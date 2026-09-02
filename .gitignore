@@ -69,8 +69,19 @@ data/cdc_landing/*
 data/watermark_landing/*
 !data/watermark_landing/*/
 !data/watermark_landing/**/.gitkeep
+data/normalized_cdc/*
+!data/normalized_cdc/*/
+!data/normalized_cdc/**/.gitkeep
+data/quarantine/*
+!data/quarantine/*/
+!data/quarantine/**/.gitkeep
 
 # Local SQLite databases
 *.db
 *.sqlite
 *.sqlite3
+
+# Spark runtime & metastore
+spark-warehouse/
+metastore_db/
+derby.log

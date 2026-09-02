@@ -1,10 +1,49 @@
-"""Pytest shared fixtures for Module 1 test suites."""
+"""Pytest shared fixtures for Module 1, 2, and 3 test suites."""
+
+import os
+from collections.abc import Generator
+from pathlib import Path
 
 import pytest
+from pyspark.sql import SparkSession
 
 from src.cdc.generator import CDCScenarioGenerator
 from src.source.generator import SnapshotConfig, SourceGenerator
 from src.source.mutation_engine import SourceMutationEngine
+
+
+def _ensure_java_home() -> None:
+    """Ensure JAVA_HOME is configured to a valid JVM runtime on macOS / Linux."""
+    if "JAVA_HOME" not in os.environ or not (Path(os.environ["JAVA_HOME"]) / "bin" / "java").exists():
+        candidate_paths = [
+            Path("/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"),
+            Path("/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home"),
+            Path("/usr/local/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"),
+            Path("/usr/lib/jvm/java-17-openjdk"),
+            Path("/usr/lib/jvm/default-java"),
+        ]
+        for candidate in candidate_paths:
+            if (candidate / "bin" / "java").exists():
+                os.environ["JAVA_HOME"] = str(candidate)
+                os.environ["PATH"] = f"{candidate}/bin:{os.environ.get('PATH', '')}"
+                break
+
+
+@pytest.fixture(scope="session")
+def spark_session() -> Generator[SparkSession, None, None]:
+    """Fixture providing a session-scoped PySpark local test session."""
+    _ensure_java_home()
+    spark = (
+        SparkSession.builder.master("local[2]")
+        .appName("CDC_Normalization_UnitTests")
+        .config("spark.ui.enabled", "false")
+        .config("spark.sql.shuffle.partitions", "2")
+        .config("spark.default.parallelism", "2")
+        .getOrCreate()
+    )
+    spark.sparkContext.setLogLevel("ERROR")
+    yield spark
+    spark.stop()
 
 
 @pytest.fixture

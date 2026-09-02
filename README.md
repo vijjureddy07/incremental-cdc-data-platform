@@ -12,7 +12,7 @@ Modern enterprise data platforms cannot afford full snapshot reloads for massive
 - **Transactional Watermark Incremental Ingestion**: Query-based incremental extraction using composite cursors `(updated_at, primary_key)` with SQLite control tables, explicit SQL transactions, optimistic concurrency versioning, and deterministic batch identities.
 - **Durable Recoverable Window Contract**: Preserving uncommitted extraction boundaries across worker failures and retrying the exact frozen HIGH boundary even if source data changes mid-stream.
 - **Change Data Capture (CDC) Event Streaming**: Granular transaction log replication capturing inserts, updates, and physical deletes with before and after images derived directly from the actual source state.
-- **Authoritative Event Sequencing**: Strict out-of-order and duplicate reconciliation using monotonically increasing sequence numbers (strictly monotonic per business key without using `event_timestamp` as a tiebreaker).
+- **Authoritative Event Sequencing & Normalization**: PySpark window-based deduplication, conflicting duplicate event quarantine, out-of-order sequence normalization, equal-sequence collision quarantine, and dead-letter routing.
 - **Golden Mutation Oracle**: In-memory transactional engine providing the exact ground truth for downstream lakehouse validation, with true deep-copy state isolation.
 
 ```
@@ -33,12 +33,20 @@ Modern enterprise data platforms cannot afford full snapshot reloads for massive
 └──────────┬──────────┘ └──────────────┬────────────────┘ └──────────────┬──────────────┘
            │                           │                                 │
            │                           ▼                                 │
-           │            ┌───────────────────────────────┐                │
-           │            │     SQLite Control Store      │                │
-           │            │  (watermark_state & audits)   │                │
-           │            └───────────────────────────────┘                │
+           │            ┌───────────────────────────────┐                ▼
+           │            │     SQLite Control Store      │ ┌─────────────────────────────┐
+           │            │  (watermark_state & audits)   │ │  CDCNormalizationPipeline   │
+           │            └───────────────────────────────┘ │    (PySpark 3.5 Engine)     │
+           │                                              └──────────────┬──────────────┘
            │                                                             │
-           └───────────────────────────┬─────────────────────────────────┘
+           │                                              ┌──────────────┴──────────────┐
+           │                                              ▼                             ▼
+           │                               ┌─────────────────────────────┐┌─────────────────────────────┐
+           │                               │    data/normalized_cdc/     ││      data/quarantine/       │
+           │                               │processing_id=P/accept.jsonl ││processing_id=P/quarant.jsonl│
+           │                               └──────────────┬──────────────┘└─────────────────────────────┘
+           │                                              │
+           └───────────────────────────┬──────────────────┘
                                        │
                                        ▼
                         ┌─────────────────────────────┐
@@ -96,28 +104,22 @@ $$\text{LOW} < (\text{updated\_at}, \text{primary\_key}) \le \text{HIGH}$$
 ### Frozen High-Watermark Window & Durable Recovery
 To prevent mid-query transaction commits from corrupting extraction windows, the pipeline captures the current maximum source watermark (`HIGH`) before querying. If extraction or landing fails, the uncommitted window is persisted in `watermark_run_audit` and reused on retry—even if source tables mutate before the retry occurs.
 
-### Durable SQLite Control Store with Explicit Transactions
-Durable local metadata management tracking:
-- `watermark_state`: Table name, cursor columns, last committed composite watermark, version, last run ID, update timestamp.
-- `watermark_run_audit`: Execution attempt history (`RUNNING`, `SUCCESS`, `NO_DATA`, `FAILED`), row counts, and landing paths.
-- **Explicit SQL Transactions**: Uses `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK` for robust ACID isolation across all control table writes.
-- **Atomic Completion**: `commit_successful_run` atomically executes compare-and-swap watermark update AND marks audit `SUCCESS` in a single transaction.
-- **Optimistic Concurrency**: Compare-and-swap SQL version verification (`UPDATE ... WHERE table_name = ? AND version = ?`) preventing concurrent writer collisions (`WatermarkConcurrencyError`).
+---
 
-### Transactional Checkpointing Order
-1. Start run audit (`RUNNING`)
-2. Read `LOW` watermark & check for recoverable failed/uncompleted window
-3. Resolve `HIGH` watermark & compute deterministic `batch_id`
-4. Update audit with window boundaries and `batch_id`
-5. If `HIGH <= LOW`: mark `NO_DATA`, exit without advancing watermark
-6. Extract bounded rows
-7. Write landing output (`data/watermark_landing/table=<t>/batch_id=<b>/data.jsonl`)
-8. Read back and verify landed file existence and exact row count
-9. Atomically commit watermark checkpoint (CAS version check) AND mark audit `SUCCESS`
+## 4. CDC Normalization, Ordering & Quarantine Pipeline
+
+Module 3 transforms raw at-least-once CDC landing files into a trustworthy, authoritative stream using **PySpark DataFrames**:
+
+1. **Exact Duplicate Replay Deduplication**: If multiple records share `event_id` and the identical SHA-256 event fingerprint, exactly one copy is accepted and redundant deliveries are dropped (`exact_duplicates_dropped`).
+2. **Conflicting Duplicate Event ID Isolation**: If the same `event_id` appears with differing semantic payloads, all conflicting records are quarantined under `DUPLICATE_EVENT_CONFLICT`.
+3. **Authoritative Entity Sequence Normalization**: Events for an entity are ordered by `sequence_number` (normalizing out-of-order arrivals 102→101 into 101→102).
+4. **Equal-Sequence Conflict Detection**: Multiple distinct events for the same entity sharing the same sequence number are quarantined under `SEQUENCE_CONFLICT`.
+5. **Dead-Letter Quarantine Store**: Malformed JSON lines and invalid structural/semantic records are routed to `data/quarantine/processing_id=<id>/quarantine.jsonl`.
+6. **Replay Determinism**: Replaying the pipeline on identical raw files yields the exact same `processing_id` and byte-for-byte identical output.
 
 ---
 
-## 4. Business Domain & Data Contracts
+## 5. Business Domain & Data Contracts
 
 The platform models a high-fidelity B2B SaaS subscription lifecycle:
 
@@ -140,15 +142,9 @@ The platform models a high-fidelity B2B SaaS subscription lifecycle:
 3. **`invoices`**: `invoice_id` (PK), `subscription_id` (FK), `invoice_date`, `due_date`, `invoice_amount` (Decimal), `invoice_status`, `created_at`, `updated_at`.
 4. **`payments`**: `payment_id` (PK), `invoice_id` (FK), `payment_date`, `payment_amount` (Decimal), `payment_method`, `payment_status`, `created_at`, `updated_at`.
 
-### Initial Snapshot Counts
-- **Accounts**: 40 records
-- **Subscriptions**: 60 records
-- **Invoices**: 120 records
-- **Payments**: 90 records
-
 ---
 
-## 5. Repository Structure
+## 6. Repository Structure
 
 ```
 incremental-cdc-data-platform/
@@ -160,6 +156,7 @@ incremental-cdc-data-platform/
 ├── docs/
 │   ├── 01_CDC_FOUNDATIONS.md
 │   ├── 02_WATERMARK_INCREMENTAL_INGESTION.md
+│   ├── 03_CDC_NORMALIZATION_ORDERING.md
 │   └── PROGRESS.md
 ├── src/
 │   ├── source/
@@ -177,6 +174,15 @@ incremental-cdc-data-platform/
 │   │   ├── source_adapter.py    # Bounded composite watermark extractor
 │   │   ├── landing.py           # Deterministic batch hashing & landing writer
 │   │   └── pipeline.py          # Transactional watermark orchestrator
+│   ├── normalization/
+│   │   ├── models.py            # NormalizedCDCEvent, QuarantinedEvent, metrics
+│   │   ├── schema.py            # PySpark StructType schemas
+│   │   ├── fingerprint.py       # Deterministic canonical keys & SHA-256 hashing
+│   │   ├── reader.py            # Fault-tolerant raw JSONL file reader
+│   │   ├── validator.py         # Structural & semantic validation rules
+│   │   ├── processor.py         # PySpark deduplication & sequence ordering engine
+│   │   ├── writer.py            # Atomic JSONL partition writers & readers
+│   │   └── pipeline.py          # End-to-end normalization orchestrator
 │   └── utils/
 │       └── helpers.py           # Date, Decimal, and path utilities
 ├── tests/
@@ -192,10 +198,15 @@ incremental-cdc-data-platform/
 │   │   ├── test_watermark_models.py
 │   │   ├── test_watermark_control_store.py
 │   │   ├── test_watermark_source_adapter.py
-│   │   └── test_watermark_landing.py
+│   │   ├── test_watermark_landing.py
+│   │   ├── test_normalization_fingerprint.py
+│   │   ├── test_normalization_validator.py
+│   │   ├── test_normalization_reader.py
+│   │   └── test_normalization_processor.py
 │   └── integration/
 │       ├── test_end_to_end_simulator.py
-│       └── test_watermark_pipeline.py
+│       ├── test_watermark_pipeline.py
+│       └── test_normalization_pipeline.py
 └── data/
     ├── source_snapshot/         # Local Parquet initial snapshots
     │   ├── accounts/.gitkeep
@@ -204,13 +215,17 @@ incremental-cdc-data-platform/
     │   └── payments/.gitkeep
     ├── cdc_landing/             # Partitioned raw JSONL change streams
     │   └── .gitkeep
-    └── watermark_landing/       # Partitioned incremental watermark landing
+    ├── watermark_landing/       # Partitioned incremental watermark landing
+    │   └── .gitkeep
+    ├── normalized_cdc/          # Partitioned accepted normalized change streams
+    │   └── .gitkeep
+    └── quarantine/              # Partitioned dead-letter quarantine store
         └── .gitkeep
 ```
 
 ---
 
-## 6. Quickstart & Verification
+## 7. Quickstart & Verification
 
 ### Local Environment Setup
 
@@ -224,7 +239,7 @@ pip install -r requirements-dev.txt
 pip install -e .
 ```
 
-### Run Full Test Suite (68 tests)
+### Run Full Test Suite (100 tests)
 
 ```bash
 pytest -v
@@ -244,14 +259,14 @@ python -m build --wheel
 
 ---
 
-## 7. Project Roadmap (Modules 1–6)
+## 8. Project Roadmap (Modules 1–6)
 
 - [x] **Module 1: Source System + Deterministic CDC Event Simulator** *(FROZEN / COMPLETE)*
   - Synthetic B2B SaaS generator, Parquet initial snapshots, CDC event generator (Inserts, Updates, Deletes, Dups, Out-of-Order, Late, Quarantine), Structured Validator, In-memory Mutation Engine.
-- [x] **Module 2: Transactional Watermark Incremental Ingestion + Control Tables** *(COMPLETED)*
+- [x] **Module 2: Transactional Watermark Incremental Ingestion + Control Tables** *(FROZEN / COMPLETE)*
   - Durable SQLite control tables, explicit SQL transactions, composite cursors `(updated_at, PK)`, bounded window extraction, durable recoverable window contract, optimistic concurrency versioning, failure recovery, physical delete blind-spot testing.
-- [ ] **Module 3: CDC Normalization, Ordering, Dedupe & Quarantine**
-  - Bronze landing ingestion, PySpark window-based deduplication, authoritative sequence ordering, dead-letter quarantine routing.
+- [x] **Module 3: CDC Normalization, Ordering, Dedupe & Quarantine** *(COMPLETED)*
+  - Raw JSONL ingestion, structural & semantic validation, PySpark window-based deduplication, duplicate-event conflict quarantine, authoritative entity sequence ordering, dead-letter quarantine store, replay determinism.
 - [ ] **Module 4: Delta MERGE, Deletes, Replay & Recovery**
   - Silver layer Delta MERGE implementation, hard delete handling, tombstone compaction, deterministic time-travel replay.
 - [ ] **Module 5: Databricks Lakeflow AUTO CDC**
