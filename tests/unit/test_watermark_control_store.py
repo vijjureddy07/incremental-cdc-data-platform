@@ -1,4 +1,4 @@
-"""Unit tests for the durable SQLite watermark control store."""
+"""Unit tests for the durable SQLite watermark control store with explicit transaction management."""
 
 import tempfile
 from pathlib import Path
@@ -8,6 +8,7 @@ import pytest
 from src.watermark.control_store import SQLiteWatermarkControlStore
 from src.watermark.models import (
     CompositeWatermark,
+    WatermarkCommitError,
     WatermarkConcurrencyError,
     WatermarkRunAudit,
     WatermarkRunStatus,
@@ -93,6 +94,140 @@ def test_control_store_optimistic_concurrency_conflict():
             assert final_state.last_watermark == wm_a
 
 
+def test_control_store_two_connection_concurrency_conflict():
+    """Verify optimistic concurrency conflict between two separate SQLite connection instances."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "control.db"
+
+        # Initialize table state
+        with SQLiteWatermarkControlStore(db_path) as init_store:
+            init_store.get_or_create_watermark_state("accounts")
+
+        # Connection 1 and Connection 2 open concurrently
+        store1 = SQLiteWatermarkControlStore(db_path)
+        store2 = SQLiteWatermarkControlStore(db_path)
+
+        state1 = store1.get_or_create_watermark_state("accounts")
+        state2 = store2.get_or_create_watermark_state("accounts")
+        assert state1.version == 1
+        assert state2.version == 1
+
+        # Connection 1 commits version 1 -> 2
+        wm1 = CompositeWatermark("2026-01-16T09:00:00Z", "ACC-0040")
+        store1.commit_watermark_checkpoint("accounts", state1.version, wm1, "run_c1")
+
+        # Connection 2 attempts to commit with stale version 1 -> raises WatermarkConcurrencyError
+        wm2 = CompositeWatermark("2026-01-16T10:00:00Z", "ACC-0050")
+        with pytest.raises(WatermarkConcurrencyError):
+            store2.commit_watermark_checkpoint("accounts", state2.version, wm2, "run_c2")
+
+        # Connection 1 commit is preserved
+        store1.close()
+        store2.close()
+
+        with SQLiteWatermarkControlStore(db_path) as check_store:
+            final_state = check_store.get_or_create_watermark_state("accounts")
+            assert final_state.version == 2
+            assert final_state.last_watermark == wm1
+
+
+def test_control_store_atomic_success_commit():
+    """Verify commit_successful_run atomically updates watermark state and marks audit SUCCESS."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "control.db"
+        with SQLiteWatermarkControlStore(db_path) as store:
+            store.get_or_create_watermark_state("accounts")
+            audit = WatermarkRunAudit(
+                run_id="run_atomic_01",
+                table_name="accounts",
+                expected_version=1,
+                batch_id="batch_acc_01",
+                low_watermark=CompositeWatermark(None, None),
+                high_watermark=CompositeWatermark("2026-01-16T09:00:00Z", "ACC-0040"),
+                status=WatermarkRunStatus.RUNNING,
+                started_at="2026-01-16T09:01:00Z",
+            )
+            store.start_run_audit(audit)
+
+            # Atomic commit
+            state = store.commit_successful_run(
+                table_name="accounts",
+                expected_version=1,
+                new_watermark=CompositeWatermark("2026-01-16T09:00:00Z", "ACC-0040"),
+                run_id="run_atomic_01",
+                rows_extracted=40,
+                landing_path="/data/watermark_landing/test.jsonl",
+            )
+
+            assert state.version == 2
+            assert state.last_watermark.key == "ACC-0040"
+
+            saved_audit = store.get_run_audit("run_atomic_01")
+            assert saved_audit is not None
+            assert saved_audit.status == WatermarkRunStatus.SUCCESS
+            assert saved_audit.rows_extracted == 40
+            assert saved_audit.completed_at is not None
+
+
+def test_control_store_atomic_success_rollback():
+    """Verify that if run audit update fails during atomic commit, the watermark update is rolled back."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "control.db"
+        with SQLiteWatermarkControlStore(db_path) as store:
+            store.get_or_create_watermark_state("accounts")
+
+            # Try to commit with a run_id that does NOT exist in watermark_run_audit
+            with pytest.raises(WatermarkCommitError):
+                store.commit_successful_run(
+                    table_name="accounts",
+                    expected_version=1,
+                    new_watermark=CompositeWatermark("2026-01-16T09:00:00Z", "ACC-0040"),
+                    run_id="non_existent_run_id",
+                    rows_extracted=10,
+                    landing_path="/fake/path.jsonl",
+                )
+
+            # Watermark state MUST remain unchanged (version 1, initial watermark)
+            state = store.get_or_create_watermark_state("accounts")
+            assert state.version == 1
+            assert state.last_watermark.is_initial
+
+
+def test_control_store_get_recoverable_window():
+    """Verify recoverable window lookup finds eligible failed/running attempts."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "control.db"
+        with SQLiteWatermarkControlStore(db_path) as store:
+            store.get_or_create_watermark_state("accounts")
+
+            # Create a failed attempt with valid window boundaries
+            audit = WatermarkRunAudit(
+                run_id="run_failed_01",
+                table_name="accounts",
+                expected_version=1,
+                batch_id="batch_acc_fail",
+                low_watermark=CompositeWatermark(None, None),
+                high_watermark=CompositeWatermark("2026-01-16T09:00:00Z", "ACC-0040"),
+                status=WatermarkRunStatus.FAILED,
+                started_at="2026-01-16T09:01:00Z",
+                error_message="Connection timeout",
+            )
+            store.start_run_audit(audit)
+
+            # Lookup recoverable window
+            rec = store.get_recoverable_window("accounts")
+            assert rec is not None
+            assert rec.run_id == "run_failed_01"
+            assert rec.batch_id == "batch_acc_fail"
+            assert rec.high_watermark.key == "ACC-0040"
+
+            # If watermark advances (e.g. by another run to version 2), failed attempt is no longer recoverable
+            store.commit_watermark_checkpoint(
+                "accounts", 1, CompositeWatermark("2026-01-16T09:00:00Z", "ACC-0040"), "run_succ"
+            )
+            assert store.get_recoverable_window("accounts") is None
+
+
 def test_control_store_table_independence():
     """Verify that committing a watermark for accounts does not affect subscriptions."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -143,6 +278,7 @@ def test_control_store_run_auditing_lifecycle():
             audit = WatermarkRunAudit(
                 run_id="run_pay_100",
                 table_name="payments",
+                expected_version=1,
                 batch_id="batch_pay_abc",
                 low_watermark=CompositeWatermark(None, None),
                 high_watermark=CompositeWatermark("2026-04-01T15:00:00Z", "PAY-0090"),

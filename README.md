@@ -9,7 +9,8 @@ A production-grade, local-first engineering framework designed to demonstrate en
 Modern enterprise data platforms cannot afford full snapshot reloads for massive transactional tables. This repository provides a complete, robust reference implementation demonstrating:
 
 - **Deterministic Transactional Source Modeling**: Compact B2B SaaS subscription domain with referential integrity and explicit PySpark schemas (pinned to PySpark 3.5.x).
-- **Transactional Watermark Incremental Ingestion**: Query-based incremental extraction using composite cursors `(updated_at, primary_key)` with SQLite control tables, optimistic concurrency versioning, and deterministic batch identities.
+- **Transactional Watermark Incremental Ingestion**: Query-based incremental extraction using composite cursors `(updated_at, primary_key)` with SQLite control tables, explicit SQL transactions, optimistic concurrency versioning, and deterministic batch identities.
+- **Durable Recoverable Window Contract**: Preserving uncommitted extraction boundaries across worker failures and retrying the exact frozen HIGH boundary even if source data changes mid-stream.
 - **Change Data Capture (CDC) Event Streaming**: Granular transaction log replication capturing inserts, updates, and physical deletes with before and after images derived directly from the actual source state.
 - **Authoritative Event Sequencing**: Strict out-of-order and duplicate reconciliation using monotonically increasing sequence numbers (strictly monotonic per business key without using `event_timestamp` as a tiebreaker).
 - **Golden Mutation Oracle**: In-memory transactional engine providing the exact ground truth for downstream lakehouse validation, with true deep-copy state isolation.
@@ -92,25 +93,27 @@ $$\text{LOW} < (\text{updated\_at}, \text{primary\_key}) \le \text{HIGH}$$
 - **LOW (Exclusive)**: `(updated_at > low_ts) OR (updated_at = low_ts AND primary_key > low_key)`
 - **HIGH (Inclusive)**: `(updated_at < high_ts) OR (updated_at = high_ts AND primary_key <= high_key)`
 
-### Frozen High-Watermark Window
-To prevent mid-query transaction commits from corrupting extraction windows, the pipeline captures the current maximum source watermark (`HIGH`) before querying, freezing the extraction boundary.
+### Frozen High-Watermark Window & Durable Recovery
+To prevent mid-query transaction commits from corrupting extraction windows, the pipeline captures the current maximum source watermark (`HIGH`) before querying. If extraction or landing fails, the uncommitted window is persisted in `watermark_run_audit` and reused on retry—even if source tables mutate before the retry occurs.
 
-### Durable SQLite Control Store
+### Durable SQLite Control Store with Explicit Transactions
 Durable local metadata management tracking:
 - `watermark_state`: Table name, cursor columns, last committed composite watermark, version, last run ID, update timestamp.
 - `watermark_run_audit`: Execution attempt history (`RUNNING`, `SUCCESS`, `NO_DATA`, `FAILED`), row counts, and landing paths.
+- **Explicit SQL Transactions**: Uses `BEGIN IMMEDIATE` / `COMMIT` / `ROLLBACK` for robust ACID isolation across all control table writes.
+- **Atomic Completion**: `commit_successful_run` atomically executes compare-and-swap watermark update AND marks audit `SUCCESS` in a single transaction.
 - **Optimistic Concurrency**: Compare-and-swap SQL version verification (`UPDATE ... WHERE table_name = ? AND version = ?`) preventing concurrent writer collisions (`WatermarkConcurrencyError`).
 
 ### Transactional Checkpointing Order
 1. Start run audit (`RUNNING`)
-2. Read `LOW` watermark
-3. Capture `HIGH` watermark
-4. If `HIGH <= LOW`: mark `NO_DATA`, exit without advancing watermark
-5. Extract bounded rows
-6. Write landing output (`data/watermark_landing/table=<t>/batch_id=<b>/data.jsonl`)
-7. Verify file existence and row count
-8. Commit watermark checkpoint (optimistic concurrency version check)
-9. Mark run audit `SUCCESS`
+2. Read `LOW` watermark & check for recoverable failed/uncompleted window
+3. Resolve `HIGH` watermark & compute deterministic `batch_id`
+4. Update audit with window boundaries and `batch_id`
+5. If `HIGH <= LOW`: mark `NO_DATA`, exit without advancing watermark
+6. Extract bounded rows
+7. Write landing output (`data/watermark_landing/table=<t>/batch_id=<b>/data.jsonl`)
+8. Read back and verify landed file existence and exact row count
+9. Atomically commit watermark checkpoint (CAS version check) AND mark audit `SUCCESS`
 
 ---
 
@@ -221,7 +224,7 @@ pip install -r requirements-dev.txt
 pip install -e .
 ```
 
-### Run Full Test Suite (61 tests)
+### Run Full Test Suite (68 tests)
 
 ```bash
 pytest -v
@@ -246,7 +249,7 @@ python -m build --wheel
 - [x] **Module 1: Source System + Deterministic CDC Event Simulator** *(FROZEN / COMPLETE)*
   - Synthetic B2B SaaS generator, Parquet initial snapshots, CDC event generator (Inserts, Updates, Deletes, Dups, Out-of-Order, Late, Quarantine), Structured Validator, In-memory Mutation Engine.
 - [x] **Module 2: Transactional Watermark Incremental Ingestion + Control Tables** *(COMPLETED)*
-  - Durable SQLite control tables, composite cursors `(updated_at, PK)`, bounded window extraction, optimistic concurrency versioning, failure recovery, physical delete blind-spot testing.
+  - Durable SQLite control tables, explicit SQL transactions, composite cursors `(updated_at, PK)`, bounded window extraction, durable recoverable window contract, optimistic concurrency versioning, failure recovery, physical delete blind-spot testing.
 - [ ] **Module 3: CDC Normalization, Ordering, Dedupe & Quarantine**
   - Bronze landing ingestion, PySpark window-based deduplication, authoritative sequence ordering, dead-letter quarantine routing.
 - [ ] **Module 4: Delta MERGE, Deletes, Replay & Recovery**

@@ -77,9 +77,9 @@ This guarantees an unambiguous, total order across all rows, preventing both ski
 
 ---
 
-## 4. Control Store Architecture & Schema
+## 4. Control Store Architecture & Durable State Schema
 
-The control store provides durable state management and operational auditability using SQLite.
+The control store provides durable state management, explicit SQL transaction boundaries, and operational auditability using SQLite.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -100,6 +100,7 @@ The control store provides durable state management and operational auditability
 ├──────────────────────────┬──────────────────────┬──────────────────────┤
 │ run_id (PK)              │ VARCHAR(64)          │ "run_acc_98a72b"     │
 │ table_name               │ VARCHAR(64)          │ "accounts"           │
+│ expected_version         │ INTEGER              │ 2                    │
 │ batch_id                 │ VARCHAR(64)          │ "batch_accounts_7f4a"│
 │ low_watermark_timestamp  │ VARCHAR(32)          │ "2026-03-02T07:00:00"│
 │ low_watermark_key        │ VARCHAR(64)          │ "ACC-0040"           │
@@ -116,32 +117,48 @@ The control store provides durable state management and operational auditability
 
 ---
 
-## 5. Transactional Watermark Checkpointing & Order of Operations
+## 5. Transactional Order of Operations & Durable Recovery
 
-A watermark must **never** be committed simply because extraction began. It must only advance after target data has landed and verified.
+A watermark must **never** advance merely because extraction started. It advances strictly through an atomic, two-phase transactional lifecycle:
 
 ```
-       1. Read State ──────► 2. Capture HIGH ──────► 3. Check NO_DATA
-             │                      │                       │
-             ▼                      ▼                       ▼
-       4. Start Audit ─────► 5. Extract Rows ──────► 6. Land JSONL
-             │                      │                       │
-             ▼                      ▼                       ▼
-       7. Verify File ─────► 8. Commit State ──────► 9. Mark SUCCESS
+1. Start RUNNING Audit ──► 2. Read LOW / Check Recoverable Window
+          │                                  │
+          ▼                                  ▼
+3. Resolve HIGH / batch_id ─► 4. Check NO_DATA (Exit if HIGH <= LOW)
+          │                                  │
+          ▼                                  ▼
+5. Extract Bounded Window ──► 6. Land Atomic JSONL Batch
+          │                                  │
+          ▼                                  ▼
+7. Verify File & Row Count ─► 8. Atomic Commit (CAS + SUCCESS Audit)
 ```
 
-### Failure Scenarios & Recovery:
-1. **Crash during extraction or landing (Steps 4–6)**:
-   - Target watermark remains at `LOW`.
-   - Run audit is marked `FAILED`.
-   - On retry: the identical bounded window is re-extracted cleanly.
-2. **Crash after landing but before checkpoint commit (Step 7/8)**:
-   - Landing file exists on disk, but control store remains at `LOW`.
-   - On retry: deterministic `batch_id` calculation targets the exact same landing directory, overwriting the file atomically. The checkpoint commits safely without creating duplicate batches.
+### The Durable Recoverable Window Contract
+If an extraction cycle captures `HIGH` and fails (either before landing or after landing before commit):
+1. **Audit Persistence**: The run is recorded in `watermark_run_audit` with `expected_version`, `low_watermark`, `high_watermark`, and `batch_id`.
+2. **Deterministic Window Recovery**: On retry, `get_recoverable_window()` checks if an uncompleted `FAILED` or `RUNNING` attempt exists matching the table's current `version` and `LOW` cursor.
+3. **Source Mutation Isolation**: If source records mutate between failure and retry (e.g. `ACC-0002` added at `11:00` after a failed run at `10:00`), the retry **reuses the exact same prior HIGH and batch_id**. It re-extracts only the original failed payload window. The newer records wait cleanly for the subsequent run cycle.
+4. **Process-Death Recovery**: If a worker dies abruptly leaving an audit in `RUNNING` status, the recovery cycle marks the prior attempt as superseded/FAILED and safely reclaims the uncommitted window.
 
 ---
 
-## 6. Deterministic Batch Identity vs. Execution Run ID
+## 6. Explicit SQLite Transactions & Atomic Completion
+
+1. **Explicit SQL Transactions (`_transaction()`)**:
+   - Connection operates in manual transaction mode with `BEGIN IMMEDIATE`.
+   - Operations commit on clean exit and roll back on any exception.
+   - Race-safe initialization uses `INSERT OR IGNORE` + `SELECT` inside an immediate transaction.
+2. **Atomic Checkpoint + SUCCESS Audit (`commit_successful_run`)**:
+   - Executes compare-and-swap watermark update AND marks audit `SUCCESS` in a single SQLite transaction.
+   - If either operation fails, both are rolled back, guaranteeing the control state never claims a watermark advanced without its matching `SUCCESS` audit.
+3. **Landed File & Row Count Verification**:
+   - After writing `data.jsonl`, the orchestrator reads the file back from disk.
+   - Verifies `landed_row_count == extracted_row_count` before invoking `commit_successful_run`. If corrupted or truncated, raises `WatermarkError`, marks the audit `FAILED`, and leaves the checkpoint untouched.
+
+---
+
+## 7. Deterministic Batch Identity vs. Execution Run ID
 
 - **`batch_id`**: Deterministic SHA-256 hash of `(table_name, low_timestamp, low_key, high_timestamp, high_key)`.
   - Identifies the **logical data payload window**.
@@ -151,7 +168,7 @@ A watermark must **never** be committed simply because extraction began. It must
 
 ---
 
-## 7. Optimistic Concurrency Control
+## 8. Optimistic Concurrency Control
 
 To prevent two concurrent pipeline workers from corrupting watermark state or overwriting newer checkpoints:
 1. When worker reads watermark state, it records the `expected_version`.
@@ -169,7 +186,7 @@ WHERE table_name = :table_name AND version = :expected_version;
 
 ---
 
-## 8. Inherent Limitations of Watermark Ingestion (Why CDC is Required)
+## 9. Inherent Limitations of Watermark Ingestion (Why CDC is Required)
 
 While watermark incremental ingestion is efficient and lightweight, it has three fundamental architectural limitations:
 

@@ -121,10 +121,11 @@ class WatermarkRunAudit:
 
     run_id: str
     table_name: str
-    batch_id: str
-    low_watermark: CompositeWatermark
-    high_watermark: CompositeWatermark
-    status: WatermarkRunStatus
+    expected_version: int | None = None
+    batch_id: str | None = None
+    low_watermark: CompositeWatermark = field(default_factory=CompositeWatermark)
+    high_watermark: CompositeWatermark = field(default_factory=CompositeWatermark)
+    status: WatermarkRunStatus = WatermarkRunStatus.RUNNING
     rows_extracted: int = 0
     landing_path: str | None = None
     started_at: str = ""
@@ -136,6 +137,7 @@ class WatermarkRunAudit:
         return {
             "run_id": self.run_id,
             "table_name": self.table_name,
+            "expected_version": self.expected_version,
             "batch_id": self.batch_id,
             "low_watermark_timestamp": self.low_watermark.timestamp,
             "low_watermark_key": self.low_watermark.key,
