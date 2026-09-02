@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 from src.normalization.models import QuarantineReasonCode
-from src.normalization.reader import read_raw_cdc_files
+from src.normalization.reader import read_raw_cdc_files, strip_ingestion_metadata
 
 
 def test_read_valid_jsonl_files():
@@ -77,3 +77,35 @@ def test_read_malformed_json_lines_isolated():
         assert quarantine[0].quarantine_code == QuarantineReasonCode.MALFORMED_JSON
         assert "{NOT_VALID_JSON_LINE" in str(quarantine[0].raw_record)
         assert quarantine[1].quarantine_code == QuarantineReasonCode.MALFORMED_JSON
+
+
+def test_strip_ingestion_metadata():
+    """Verify strip_ingestion_metadata removes transient enrichment fields while preserving raw payload."""
+    enriched = {
+        "event_id": "evt_001",
+        "table_name": "accounts",
+        "operation": "INSERT",
+        "business_key": {"account_id": "ACC-0001"},
+        "sequence_number": 1,
+        "event_timestamp": "2026-05-11T01:00:00Z",
+        "source_commit_timestamp": "2026-05-11T01:00:01Z",
+        "batch_id": "batch_001",
+        "payload": {"account_id": "ACC-0001"},
+        "before_payload": None,
+        "source_system": "b2b_saas_postgres",
+        "source_file": "batch_id=batch_001/accounts.jsonl",
+        "ingestion_batch_id": "batch_001",
+        "ingestion_order": 42,
+    }
+
+    cleaned = strip_ingestion_metadata(enriched)
+    assert isinstance(cleaned, dict)
+    assert "source_file" not in cleaned
+    assert "ingestion_batch_id" not in cleaned
+    assert "ingestion_order" not in cleaned
+    assert cleaned["event_id"] == "evt_001"
+    assert cleaned["payload"] == {"account_id": "ACC-0001"}
+
+    # Non-dict inputs are returned as-is
+    assert strip_ingestion_metadata("raw_string_line") == "raw_string_line"
+    assert strip_ingestion_metadata(None) is None

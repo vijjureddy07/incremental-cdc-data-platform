@@ -395,3 +395,101 @@ def test_normalization_pipeline_byte_level_replay_determinism(spark_session: Spa
         # Byte-for-byte identical contents
         assert acc_bytes_1 == acc_bytes_2
         assert quar_bytes_1 == quar_bytes_2
+
+
+def test_normalization_pipeline_reversed_validation_quarantine(spark_session: SparkSession):
+    """Verify invalid validation events in different files produce identical quarantine outputs regardless of file input ordering."""
+    with tempfile.TemporaryDirectory() as tmpdir1, tempfile.TemporaryDirectory() as tmpdir2:
+        # Invalid accounts event (missing payload for INSERT)
+        invalid_acc_event = {
+            "event_id": "evt_inv_acc_001",
+            "table_name": "accounts",
+            "operation": "INSERT",
+            "business_key": {"account_id": "ACC-9999"},
+            "sequence_number": 1,
+            "event_timestamp": "2026-05-11T01:00:00Z",
+            "source_commit_timestamp": "2026-05-11T01:00:01Z",
+            "batch_id": "batch_003_quarantine",
+            "payload": None,
+            "before_payload": None,
+            "source_system": "b2b_saas_postgres",
+        }
+        # Invalid payments event (unsupported operation)
+        invalid_pay_event = {
+            "event_id": "evt_inv_pay_001",
+            "table_name": "payments",
+            "operation": "PURGE",
+            "business_key": {"payment_id": "PAY-9999"},
+            "sequence_number": 1,
+            "event_timestamp": "2026-05-11T01:00:00Z",
+            "source_commit_timestamp": "2026-05-11T01:00:01Z",
+            "batch_id": "batch_003_quarantine",
+            "payload": {"payment_id": "PAY-9999"},
+            "before_payload": None,
+            "source_system": "b2b_saas_postgres",
+        }
+
+        # Env 1: accounts then payments
+        base1 = Path(tmpdir1)
+        acc_file_1 = base1 / "cdc_landing" / "batch_id=batch_003" / "accounts.jsonl"
+        acc_file_1.parent.mkdir(parents=True, exist_ok=True)
+        acc_file_1.write_text(json.dumps(invalid_acc_event) + "\n", encoding="utf-8")
+
+        pay_file_1 = base1 / "cdc_landing" / "batch_id=batch_003" / "payments.jsonl"
+        pay_file_1.parent.mkdir(parents=True, exist_ok=True)
+        pay_file_1.write_text(json.dumps(invalid_pay_event) + "\n", encoding="utf-8")
+
+        p1 = CDCNormalizationPipeline(
+            spark=spark_session,
+            normalized_base_dir=base1 / "norm",
+            quarantine_base_dir=base1 / "quar",
+        )
+        _, q1, m1 = p1.run_pipeline([acc_file_1, pay_file_1])
+        quar_file_1 = base1 / "quar" / f"processing_id={m1.processing_id}" / "quarantine.jsonl"
+        quar_bytes_1 = quar_file_1.read_bytes()
+
+        # Env 2: payments then accounts (reversed input order in independent temp directory)
+        base2 = Path(tmpdir2)
+        acc_file_2 = base2 / "cdc_landing" / "batch_id=batch_003" / "accounts.jsonl"
+        acc_file_2.parent.mkdir(parents=True, exist_ok=True)
+        acc_file_2.write_text(json.dumps(invalid_acc_event) + "\n", encoding="utf-8")
+
+        pay_file_2 = base2 / "cdc_landing" / "batch_id=batch_003" / "payments.jsonl"
+        pay_file_2.parent.mkdir(parents=True, exist_ok=True)
+        pay_file_2.write_text(json.dumps(invalid_pay_event) + "\n", encoding="utf-8")
+
+        p2 = CDCNormalizationPipeline(
+            spark=spark_session,
+            normalized_base_dir=base2 / "norm",
+            quarantine_base_dir=base2 / "quar",
+        )
+        _, q2, m2 = p2.run_pipeline([pay_file_2, acc_file_2])
+        quar_file_2 = base2 / "quar" / f"processing_id={m2.processing_id}" / "quarantine.jsonl"
+        quar_bytes_2 = quar_file_2.read_bytes()
+
+        # 1. Processing ID must be identical across runs
+        assert m1.processing_id == m2.processing_id
+
+        # 2. Record count matches
+        assert len(q1) == 2
+        assert len(q2) == 2
+
+        # 3. Serialized dictionary representation matches identically
+        assert [q.to_dict() for q in q1] == [q.to_dict() for q in q2]
+
+        # 4. Byte-for-byte identical persisted quarantine files
+        assert quar_bytes_1 == quar_bytes_2
+
+        # 5. Verify raw_record does NOT contain ingestion_order or transient metadata
+        for q in q1 + q2:
+            assert isinstance(q.raw_record, dict)
+            assert "ingestion_order" not in q.raw_record
+            assert "ingestion_batch_id" not in q.raw_record
+            assert "source_file" not in q.raw_record
+
+        # 6. Verify source_file is logical and portable (no absolute /tmp/ or /var/ paths)
+        source_files = {q.source_file for q in q1}
+        assert source_files == {
+            "batch_id=batch_003/accounts.jsonl",
+            "batch_id=batch_003/payments.jsonl",
+        }

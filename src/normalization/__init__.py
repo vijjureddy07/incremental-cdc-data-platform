@@ -17,7 +17,7 @@ from src.normalization.models import (
 )
 from src.normalization.pipeline import CDCNormalizationPipeline
 from src.normalization.processor import SparkCDCNormalizationProcessor
-from src.normalization.reader import read_raw_cdc_files
+from src.normalization.reader import read_raw_cdc_files, strip_ingestion_metadata
 from src.normalization.schema import NORMALIZED_CDC_SPARK_SCHEMA, RAW_CDC_SPARK_SCHEMA
 from src.normalization.validator import TABLE_PRIMARY_KEYS, validate_raw_cdc_record
 from src.normalization.writer import (
@@ -47,6 +47,7 @@ __all__ = [
     "read_normalized_accepted_jsonl",
     "read_quarantine_jsonl",
     "read_raw_cdc_files",
+    "strip_ingestion_metadata",
     "validate_raw_cdc_record",
     "write_normalized_accepted_jsonl",
     "write_quarantine_jsonl",

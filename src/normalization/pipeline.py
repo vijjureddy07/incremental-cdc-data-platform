@@ -16,7 +16,7 @@ from src.normalization.models import (
     QuarantinedEvent,
 )
 from src.normalization.processor import SparkCDCNormalizationProcessor
-from src.normalization.reader import read_raw_cdc_files
+from src.normalization.reader import read_raw_cdc_files, strip_ingestion_metadata
 from src.normalization.validator import validate_raw_cdc_record
 from src.normalization.writer import (
     write_normalized_accepted_jsonl,
@@ -49,7 +49,7 @@ class CDCNormalizationPipeline:
 
         # Resolve deterministic content-addressed processing_id from logical file IDs + content hashes
         clean_file_paths = [Path(p) for p in file_paths if Path(p).exists()]
-        processing_id, manifest_entries = compute_manifest_and_processing_id(clean_file_paths)
+        processing_id, _ = compute_manifest_and_processing_id(clean_file_paths)
 
         # Step 1: Read raw files and isolate malformed JSON lines
         parsed_records, malformed_quarantine = read_raw_cdc_files(clean_file_paths)
@@ -67,7 +67,7 @@ class CDCNormalizationPipeline:
                     QuarantinedEvent(
                         quarantine_code=q_code or "VALIDATION_FAILED",
                         quarantine_reason=q_reason or "Unknown validation error.",
-                        raw_record=r,
+                        raw_record=strip_ingestion_metadata(r),
                         event_id=r.get("event_id"),
                         table_name=r.get("table_name"),
                         source_file=r.get("source_file"),

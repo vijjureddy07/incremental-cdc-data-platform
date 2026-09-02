@@ -17,6 +17,16 @@ def extract_batch_id_from_path(path: Path) -> str:
     return path.parent.name or "unknown_batch"
 
 
+def strip_ingestion_metadata(
+    record: dict[str, Any] | str | None,
+) -> dict[str, Any] | str | None:
+    """Return a copy of a raw record stripped of transient reader-enrichment metadata."""
+    if not isinstance(record, dict):
+        return record
+    transient_keys = {"source_file", "ingestion_batch_id", "ingestion_order"}
+    return {k: v for k, v in record.items() if k not in transient_keys}
+
+
 def read_raw_cdc_files(
     file_paths: list[str | Path],
 ) -> tuple[list[dict[str, Any]], list[QuarantinedEvent]]:
