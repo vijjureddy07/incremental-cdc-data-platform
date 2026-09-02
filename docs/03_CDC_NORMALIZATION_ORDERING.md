@@ -33,6 +33,7 @@ In modern event-driven architectures, Change Data Capture (CDC) events emitted f
      │ • Authoritative Sequence    │                 │ • Explicit Reason Codes     │
      │ • Exact Duplicates Dropped  │                 │ • Preserved Raw Line/Record │
      │ • Replay-Safe Fingerprints  │                 │ • Malformed JSON & Conflicts│
+     │ • Portable Logical Paths    │                 │ • Deterministic Tie-Breaking│
      └─────────────────────────────┘                 └─────────────────────────────┘
 ```
 
@@ -58,14 +59,15 @@ Distributed event streaming platforms (Kafka, Event Hubs, SQS) guarantee **at-le
      │  Exact Duplicate Delivery │            │ Duplicate Event Conflict  │
      ├───────────────────────────┤            ├───────────────────────────┤
      │ • Keep exactly 1 copy     │            │ • Quarantine ALL copies   │
-     │ • Drop additional replays │            │ • Reason:                 │
-     │ • Safe for downstream     │            │   DUPLICATE_EVENT_CONFLICT│
+     │ • Deterministic winner    │            │ • Reason:                 │
+     │ • Drop additional replays │            │   DUPLICATE_EVENT_CONFLICT│
      └───────────────────────────┘            └───────────────────────────┘
 ```
 
 1. **Exact Duplicate Delivery**:
    - Multiple records share the same `event_id` and the **identical SHA-256 event fingerprint**.
-   - **Resolution**: Keep the first instance (`row_number() == 1`), drop redundant copies, and track `exact_duplicates_dropped`.
+   - **Deterministic Representative Selection**: Selected via stable provenance ordering: `batch_id ASC`, `ingestion_batch_id ASC`, `source_file ASC`, and `ingestion_order ASC`.
+   - **Resolution**: Keep the deterministic winner (`row_number() == 1`), drop redundant copies, and track `exact_duplicates_dropped`.
 2. **Conflicting Duplicate Event ID**:
    - Multiple records share the same `event_id` but have **different fingerprints** (e.g., payload, operation, or sequence changed).
    - **Resolution**: Do NOT arbitrarily pick a winner. Quarantine **all conflicting records** under `DUPLICATE_EVENT_CONFLICT` to prevent silent state corruption.
@@ -96,37 +98,52 @@ Normalized Stream:   [ Seq 101 (country: GB) ]    ──►  [ Seq 102 (status: 
 
 ---
 
-## 4. Late-Arriving Events
+## 4. Ingestion-Context Late-Arriving Events
 
-A late-arriving event is an event whose `event_timestamp` is historically older than the current ingestion batch, but whose structure and sequence number are valid.
+A late-arriving event is defined strictly through **deterministic ingestion context and timestamp boundaries**, rather than substring name heuristics:
 
-- **Handling**: Preserved in the accepted normalized stream and tagged with `is_late_arrival = True`.
-- **Downstream Application**: Module 4 MERGE logic uses the authoritative `sequence_number` to determine whether the late event represents a new state or has already been superseded by a higher sequence.
-
----
-
-## 5. Canonical Keys & Deterministic Event Fingerprints
-
-### Canonical Business Key Formatting
-To prevent JSON dictionary key ordering differences from altering identity:
-```json
-{"region": "US", "account_id": "ACC-0001"}
-```
-is normalized into alphabetical, whitespace-free canonical JSON:
-```json
-{"account_id":"ACC-0001","region":"US"}
-```
-
-### Deterministic SHA-256 Event Fingerprint
-Computed across stable semantic fields:
-```
-sha256(event_id | table_name | operation | canonical_key | sequence | event_ts | commit_ts | canonical_payload | canonical_before | source_system)
-```
-Excluded: transient ingestion metadata (`source_file`, `ingestion_batch_id`, `ingestion_order`, Spark partition IDs).
+1. Input ingestion batches are ordered deterministically by `ingestion_batch_id` (e.g. `batch_001` precedes `batch_002`).
+2. For each batch $B_i$ in sorted batch order:
+   - Calculate $\text{prior\_max\_ts} = \max(\text{event\_timestamp})$ across all valid records in batches $B_0, \dots, B_{i-1}$.
+   - An event in batch $B_i$ ($i > 0$) is late when $\text{event\_timestamp} < \text{prior\_max\_ts}$ (strict $<$ comparison).
+   - Events in the first batch ($B_0$) are never marked late.
+3. **Handling**: Preserved in the accepted normalized stream and tagged with `is_late_arrival = True`.
 
 ---
 
-## 6. Machine-Readable Quarantine Taxonomy
+## 5. Portable Canonical Manifest & Processing Identity
+
+### Machine-Independent Content Addressing
+To guarantee identical `processing_id` across different host machines, absolute paths (`/Users/...`, `/tmp/...`) are replaced by portable logical file IDs and raw byte digests:
+
+1. **Logical File ID**: `batch_id=<batch-id>/<filename>` (e.g. `batch_id=batch_001/accounts.jsonl`).
+2. **Raw Byte Digest**: `sha256(raw_file_bytes)`.
+3. **Canonical Manifest**: Sorted list of entries `f"{logical_file_id}:{file_sha256}"`.
+4. **Processing ID**: `proc_<sha256(manifest)[:16]>`.
+
+```
+Manifest:
+  batch_id=batch_001/accounts.jsonl:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+  batch_id=batch_001/subscriptions.jsonl:a2c1...
+                       │
+                       ▼  (SHA-256 Digest)
+         processing_id = proc_84886e920983
+```
+
+- **Invariance**: Identical files in different temporary directories produce the **exact same `processing_id`**.
+- **Tamper Detection**: Modifying a single byte in any raw input file produces a **different `processing_id`**.
+
+---
+
+## 6. Separation of Deterministic Output & Audit Execution
+
+Volatile execution timestamps (`normalized_at`, `quarantined_at`, `started_at`, `completed_at`, `run_id`) are decoupled from persistent logical files:
+- **`accepted.jsonl`** and **`quarantine.jsonl`**: Contain only deterministic logical records and portable logical provenance (`source_file = batch_id=...`). Replaying the same inputs produces **byte-for-byte identical files**.
+- **`NormalizationAuditMetrics`**: Captures operational run metrics (`run_id`, `started_at`, `completed_at`, `raw_records_seen`, `accepted_records`, `exact_duplicates_dropped`, `quarantined_records`).
+
+---
+
+## 7. Machine-Readable Quarantine Taxonomy
 
 | Quarantine Code | Category | Trigger Condition |
 | :--- | :--- | :--- |
@@ -139,21 +156,20 @@ Excluded: transient ingestion metadata (`source_file`, `ingestion_batch_id`, `in
 | `MISSING_SEQUENCE` | Structural | Missing `sequence_number`. |
 | `INVALID_SEQUENCE` | Semantic | Sequence number $\le 0$ or non-integer. |
 | `MISSING_EVENT_TIMESTAMP` | Structural | Missing or empty `event_timestamp`. |
+| `INVALID_EVENT_TIMESTAMP` | Semantic | `event_timestamp` string cannot be parsed as valid ISO 8601 UTC timestamp. |
 | `MISSING_COMMIT_TIMESTAMP` | Structural | Missing or empty `source_commit_timestamp`. |
+| `INVALID_COMMIT_TIMESTAMP` | Semantic | `source_commit_timestamp` string cannot be parsed as valid ISO 8601 UTC timestamp. |
 | `MISSING_SOURCE_SYSTEM` | Structural | Missing `source_system`. |
 | `MISSING_PAYLOAD` | Semantic | `INSERT` or `UPDATE` missing after-image `payload`. |
 | `MISSING_BEFORE_IMAGE` | Semantic | `UPDATE` or `DELETE` missing before-image `before_payload`. |
 | `UNEXPECTED_DELETE_PAYLOAD` | Semantic | `DELETE` containing non-null after-image `payload`. |
-| `BUSINESS_KEY_PAYLOAD_MISMATCH` | Consistency | Primary key in payload does not match `business_key`. |
+| `BUSINESS_KEY_PAYLOAD_MISMATCH` | Consistency | Missing or mismatched primary key in present `payload` or `before_payload`. |
 | `DUPLICATE_EVENT_CONFLICT` | Conflict | Same `event_id` appears with conflicting payloads. |
 | `SEQUENCE_CONFLICT` | Conflict | Same entity has multiple distinct events at same sequence. |
 
 ---
 
-## 7. Replay Determinism & Audit Reconciliation
-
-### Deterministic Processing Identity (`processing_id`)
-Generated via SHA-256 across sorted input file paths and contents (`proc_<sha256[:16]>`). Replaying the pipeline over the exact same input batch produces the identical `processing_id` and atomic overwrites.
+## 8. Replay Determinism & Audit Reconciliation
 
 ### Audit Invariant Reconciliation
 Every run produces an audit metrics object satisfying:
@@ -161,7 +177,7 @@ $$\text{raw\_records\_seen} = \text{accepted\_records} + \text{exact\_duplicates
 
 ---
 
-## 8. Why Normalization Precedes Delta Lake MERGE (Module 4 Handoff)
+## 9. Why Normalization Precedes Delta Lake MERGE (Module 4 Handoff)
 
 Directly executing Delta Lake `MERGE` against raw CDC streams causes severe data corruption:
 1. **Unordered Merges**: Applying sequence 102 before sequence 101 overwrites final state with stale data.

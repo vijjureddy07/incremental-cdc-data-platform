@@ -22,7 +22,7 @@ def test_processor_exact_duplicate_deduplication(spark_session: SparkSession):
         "payload": {"account_id": "ACC-0041", "status": "ACTIVE"},
         "before_payload": None,
         "source_system": "b2b_saas_postgres",
-        "source_file": "batch_001/accounts.jsonl",
+        "source_file": "batch_id=batch_001/accounts.jsonl",
         "ingestion_batch_id": "batch_001",
         "ingestion_order": 1,
     }
@@ -31,6 +31,7 @@ def test_processor_exact_duplicate_deduplication(spark_session: SparkSession):
     event2 = dict(event1)
     event2["ingestion_order"] = 2
     event2["ingestion_batch_id"] = "batch_002"
+    event2["source_file"] = "batch_id=batch_002/accounts.jsonl"
 
     accepted, quarantined, exact_dups_dropped, dup_conflicts, seq_conflicts = processor.process([event1, event2])
 
@@ -40,6 +41,45 @@ def test_processor_exact_duplicate_deduplication(spark_session: SparkSession):
     assert dup_conflicts == 0
     assert seq_conflicts == 0
     assert accepted[0].event_id == "evt_ins_acc_0041"
+    # Winner selected deterministically by batch_id/ingestion_batch_id ASC (batch_001)
+    assert accepted[0].batch_id == "batch_001"
+
+
+def test_processor_exact_duplicate_winner_selection_stable_across_order(spark_session: SparkSession):
+    """Verify exact duplicate winner is chosen by deterministic provenance ordering regardless of input list order."""
+    processor = SparkCDCNormalizationProcessor(spark_session)
+
+    ev_b1 = {
+        "event_id": "evt_ins_acc_0041",
+        "table_name": "accounts",
+        "operation": "INSERT",
+        "business_key": {"account_id": "ACC-0041"},
+        "sequence_number": 1,
+        "event_timestamp": "2026-05-11T01:05:00Z",
+        "source_commit_timestamp": "2026-05-11T01:05:01Z",
+        "batch_id": "batch_001",
+        "payload": {"account_id": "ACC-0041", "status": "ACTIVE"},
+        "before_payload": None,
+        "source_system": "b2b_saas_postgres",
+        "source_file": "batch_id=batch_001/accounts.jsonl",
+        "ingestion_batch_id": "batch_001",
+        "ingestion_order": 1,
+    }
+
+    ev_b2 = dict(ev_b1)
+    ev_b2["batch_id"] = "batch_002"
+    ev_b2["ingestion_batch_id"] = "batch_002"
+    ev_b2["source_file"] = "batch_id=batch_002/accounts.jsonl"
+    ev_b2["ingestion_order"] = 2
+
+    # Run order 1: [ev_b1, ev_b2]
+    acc1, _, _, _, _ = processor.process([ev_b1, ev_b2])
+    # Run order 2: [ev_b2, ev_b1]
+    acc2, _, _, _, _ = processor.process([ev_b2, ev_b1])
+
+    assert acc1[0].batch_id == "batch_001"
+    assert acc2[0].batch_id == "batch_001"
+    assert acc1[0].source_file == acc2[0].source_file
 
 
 def test_processor_conflicting_duplicate_event_id_quarantine(spark_session: SparkSession):
@@ -58,7 +98,7 @@ def test_processor_conflicting_duplicate_event_id_quarantine(spark_session: Spar
         "payload": {"account_id": "ACC-0001", "status": "ACTIVE"},
         "before_payload": {"account_id": "ACC-0001", "status": "SUSPENDED"},
         "source_system": "b2b_saas_postgres",
-        "source_file": "batch_001/accounts.jsonl",
+        "source_file": "batch_id=batch_001/accounts.jsonl",
         "ingestion_batch_id": "batch_001",
         "ingestion_order": 1,
     }
@@ -94,7 +134,7 @@ def test_processor_out_of_order_sequence_normalization(spark_session: SparkSessi
         "payload": {"account_id": "ACC-0002", "status": "TRIAL"},
         "before_payload": {"account_id": "ACC-0002", "status": "ACTIVE"},
         "source_system": "b2b_saas_postgres",
-        "source_file": "batch_002/accounts.jsonl",
+        "source_file": "batch_id=batch_002/accounts.jsonl",
         "ingestion_batch_id": "batch_002",
         "ingestion_order": 1,
     }
@@ -112,7 +152,7 @@ def test_processor_out_of_order_sequence_normalization(spark_session: SparkSessi
         "payload": {"account_id": "ACC-0002", "country": "GB"},
         "before_payload": {"account_id": "ACC-0002", "country": "US"},
         "source_system": "b2b_saas_postgres",
-        "source_file": "batch_002/accounts.jsonl",
+        "source_file": "batch_id=batch_002/accounts.jsonl",
         "ingestion_batch_id": "batch_002",
         "ingestion_order": 2,
     }
@@ -147,7 +187,7 @@ def test_processor_equal_sequence_conflict_quarantine(spark_session: SparkSessio
         "payload": {"account_id": "ACC-0001", "status": "ACTIVE"},
         "before_payload": {"account_id": "ACC-0001", "status": "SUSPENDED"},
         "source_system": "b2b_saas_postgres",
-        "source_file": "batch_001/accounts.jsonl",
+        "source_file": "batch_id=batch_001/accounts.jsonl",
         "ingestion_batch_id": "batch_001",
         "ingestion_order": 1,
     }
@@ -165,7 +205,7 @@ def test_processor_equal_sequence_conflict_quarantine(spark_session: SparkSessio
         "payload": {"account_id": "ACC-0001", "industry": "Fintech"},
         "before_payload": {"account_id": "ACC-0001", "industry": "Healthcare"},
         "source_system": "b2b_saas_postgres",
-        "source_file": "batch_001/accounts.jsonl",
+        "source_file": "batch_id=batch_001/accounts.jsonl",
         "ingestion_batch_id": "batch_001",
         "ingestion_order": 2,
     }
@@ -195,7 +235,7 @@ def test_processor_cross_entity_same_sequence_allowed(spark_session: SparkSessio
         "payload": {"account_id": "ACC-0001", "status": "ACTIVE"},
         "before_payload": {"account_id": "ACC-0001", "status": "SUSPENDED"},
         "source_system": "b2b_saas_postgres",
-        "source_file": "batch_001/accounts.jsonl",
+        "source_file": "batch_id=batch_001/accounts.jsonl",
         "ingestion_batch_id": "batch_001",
         "ingestion_order": 1,
     }
@@ -213,7 +253,7 @@ def test_processor_cross_entity_same_sequence_allowed(spark_session: SparkSessio
         "payload": {"account_id": "ACC-0002", "status": "ACTIVE"},
         "before_payload": {"account_id": "ACC-0002", "status": "SUSPENDED"},
         "source_system": "b2b_saas_postgres",
-        "source_file": "batch_001/accounts.jsonl",
+        "source_file": "batch_id=batch_001/accounts.jsonl",
         "ingestion_batch_id": "batch_001",
         "ingestion_order": 2,
     }
@@ -227,9 +267,99 @@ def test_processor_cross_entity_same_sequence_allowed(spark_session: SparkSessio
     assert seq_conflicts == 0
 
 
-def test_processor_late_arriving_event_preserved(spark_session: SparkSession):
-    """Verify that late-arriving events are accepted if valid and tagged appropriately."""
+def test_processor_late_arrival_without_late_in_name(spark_session: SparkSession):
+    """Test A: An event without 'late' in event_id is correctly tagged late based on ingestion history."""
     processor = SparkCDCNormalizationProcessor(spark_session)
+
+    # Batch 1 normal event (timestamp: 2026-05-11T01:00:00Z)
+    ev_b1 = {
+        "event_id": "evt_b1_acc",
+        "table_name": "accounts",
+        "operation": "INSERT",
+        "business_key": {"account_id": "ACC-0001"},
+        "sequence_number": 1,
+        "event_timestamp": "2026-05-11T01:00:00Z",
+        "source_commit_timestamp": "2026-05-11T01:00:01Z",
+        "batch_id": "batch_001",
+        "payload": {"account_id": "ACC-0001"},
+        "before_payload": None,
+        "source_system": "b2b_saas_postgres",
+        "source_file": "batch_id=batch_001/accounts.jsonl",
+        "ingestion_batch_id": "batch_001",
+        "ingestion_order": 1,
+    }
+
+    # Batch 2 correction event with NO 'late' substring in ID, but older timestamp (2026-01-01)
+    ev_b2_correction = {
+        "event_id": "evt_sub_correction_0002",
+        "table_name": "subscriptions",
+        "operation": "UPDATE",
+        "business_key": {"subscription_id": "SUB-0002"},
+        "sequence_number": 5,
+        "event_timestamp": "2026-01-01T00:00:00Z",  # Historically behind Batch 1
+        "source_commit_timestamp": "2026-01-01T00:00:05Z",
+        "batch_id": "batch_002",
+        "payload": {"subscription_id": "SUB-0002", "billing_cycle": "ANNUAL"},
+        "before_payload": {"subscription_id": "SUB-0002", "billing_cycle": "MONTHLY"},
+        "source_system": "b2b_saas_postgres",
+        "source_file": "batch_id=batch_002/subscriptions.jsonl",
+        "ingestion_batch_id": "batch_002",
+        "ingestion_order": 2,
+    }
+
+    accepted, _, _, _, _ = processor.process([ev_b1, ev_b2_correction])
+
+    corr_event = next(e for e in accepted if e.event_id == "evt_sub_correction_0002")
+    assert corr_event.is_late_arrival is True
+
+
+def test_processor_not_late_despite_late_in_name(spark_session: SparkSession):
+    """Test B: An event containing 'late' in event_id is NOT marked late if its timestamp is current."""
+    processor = SparkCDCNormalizationProcessor(spark_session)
+
+    ev_normal = {
+        "event_id": "evt_latest_account_update",  # Contains 'late'
+        "table_name": "accounts",
+        "operation": "INSERT",
+        "business_key": {"account_id": "ACC-0001"},
+        "sequence_number": 1,
+        "event_timestamp": "2026-05-11T01:30:00Z",
+        "source_commit_timestamp": "2026-05-11T01:30:01Z",
+        "batch_id": "batch_001",
+        "payload": {"account_id": "ACC-0001"},
+        "before_payload": None,
+        "source_system": "b2b_saas_postgres",
+        "source_file": "batch_id=batch_001/accounts.jsonl",
+        "ingestion_batch_id": "batch_001",
+        "ingestion_order": 1,
+    }
+
+    accepted, _, _, _, _ = processor.process([ev_normal])
+
+    assert len(accepted) == 1
+    assert accepted[0].is_late_arrival is False
+
+
+def test_processor_frozen_module1_late_sub_tagged_by_context(spark_session: SparkSession):
+    """Test C: Frozen Module 1 evt_late_sub_0002 is tagged late via ingestion context."""
+    processor = SparkCDCNormalizationProcessor(spark_session)
+
+    ev_b1 = {
+        "event_id": "evt_b1_acc",
+        "table_name": "accounts",
+        "operation": "INSERT",
+        "business_key": {"account_id": "ACC-0001"},
+        "sequence_number": 1,
+        "event_timestamp": "2026-05-11T01:00:00Z",
+        "source_commit_timestamp": "2026-05-11T01:00:01Z",
+        "batch_id": "batch_001",
+        "payload": {"account_id": "ACC-0001"},
+        "before_payload": None,
+        "source_system": "b2b_saas_postgres",
+        "source_file": "batch_id=batch_001/accounts.jsonl",
+        "ingestion_batch_id": "batch_001",
+        "ingestion_order": 1,
+    }
 
     late_event = {
         "event_id": "evt_late_sub_0002",
@@ -237,19 +367,18 @@ def test_processor_late_arriving_event_preserved(spark_session: SparkSession):
         "operation": "UPDATE",
         "business_key": {"subscription_id": "SUB-0002"},
         "sequence_number": 5,
-        "event_timestamp": "2026-01-01T00:00:00Z",  # Older timestamp
+        "event_timestamp": "2026-01-01T00:00:00Z",
         "source_commit_timestamp": "2026-01-01T00:00:05Z",
         "batch_id": "batch_002",
         "payload": {"subscription_id": "SUB-0002", "billing_cycle": "ANNUAL"},
         "before_payload": {"subscription_id": "SUB-0002", "billing_cycle": "MONTHLY"},
         "source_system": "b2b_saas_postgres",
-        "source_file": "batch_002/subscriptions.jsonl",
+        "source_file": "batch_id=batch_002/subscriptions.jsonl",
         "ingestion_batch_id": "batch_002",
-        "ingestion_order": 1,
+        "ingestion_order": 2,
     }
 
-    accepted, quarantined, exact_dups_dropped, dup_conflicts, seq_conflicts = processor.process([late_event])
+    accepted, _, _, _, _ = processor.process([ev_b1, late_event])
 
-    assert len(accepted) == 1
-    assert len(quarantined) == 0
-    assert accepted[0].is_late_arrival is True
+    late_sub = next(e for e in accepted if e.event_id == "evt_late_sub_0002")
+    assert late_sub.is_late_arrival is True

@@ -1,12 +1,13 @@
 """PySpark-based CDC normalization, deduplication, conflict resolution, and sequence ordering engine."""
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
+    BooleanType,
     LongType,
     MapType,
     StringType,
@@ -25,7 +26,7 @@ from src.normalization.models import (
     QuarantinedEvent,
     QuarantineReasonCode,
 )
-from src.utils.helpers import format_iso_timestamp
+from src.utils.helpers import parse_iso_timestamp
 
 ENRICHED_CDC_SCHEMA = StructType(
     [
@@ -46,6 +47,7 @@ ENRICHED_CDC_SCHEMA = StructType(
         StructField("ingestion_batch_id", StringType(), True),
         StructField("ingestion_order", LongType(), True),
         StructField("event_fingerprint", StringType(), True),
+        StructField("is_late_arrival", BooleanType(), True),
     ]
 )
 
@@ -68,15 +70,46 @@ class SparkCDCNormalizationProcessor:
         if not valid_records:
             return [], [], 0, 0, 0
 
-        now_str = format_iso_timestamp(datetime.now(UTC))
+        # 1. Compute Ingestion-Context Late Arrival Boundaries
+        # Deterministically order all observed ingestion batches
+        sorted_batch_ids = sorted(
+            {str(r.get("ingestion_batch_id") or r.get("batch_id") or "") for r in valid_records}
+        )
 
-        # 1. Enrich records with canonical keys and deterministic fingerprints
+        prior_max_ts_by_batch: dict[str, datetime | None] = {}
+        running_max_ts: datetime | None = None
+
+        for b_id in sorted_batch_ids:
+            prior_max_ts_by_batch[b_id] = running_max_ts
+            batch_records = [
+                r
+                for r in valid_records
+                if str(r.get("ingestion_batch_id") or r.get("batch_id") or "") == b_id
+            ]
+            for br in batch_records:
+                try:
+                    ts_dt = parse_iso_timestamp(str(br.get("event_timestamp")))
+                    if running_max_ts is None or ts_dt > running_max_ts:
+                        running_max_ts = ts_dt
+                except Exception:
+                    pass
+
+        # 2. Enrich records with canonical keys, deterministic fingerprints, and late arrival flags
         enriched_rows: list[dict[str, Any]] = []
         for r in valid_records:
             b_key_dict = {str(k): str(v) for k, v in r.get("business_key", {}).items()}
             b_key_canonical = canonicalize_business_key(b_key_dict)
             entity_key = compute_entity_sequence_key(r["table_name"], b_key_canonical)
             fingerprint = compute_event_fingerprint(r)
+
+            # Ingestion-derived late arrival determination
+            rec_batch = str(r.get("ingestion_batch_id") or r.get("batch_id") or "")
+            prior_max = prior_max_ts_by_batch.get(rec_batch)
+            try:
+                rec_ts = parse_iso_timestamp(str(r.get("event_timestamp")))
+                is_late = bool(prior_max is not None and rec_ts < prior_max)
+            except Exception:
+                is_late = False
 
             row_copy = {
                 "event_id": str(r.get("event_id", "")),
@@ -102,15 +135,22 @@ class SparkCDCNormalizationProcessor:
                 "ingestion_batch_id": str(r.get("ingestion_batch_id", "")),
                 "ingestion_order": int(r.get("ingestion_order", 0)),
                 "event_fingerprint": fingerprint,
+                "is_late_arrival": is_late,
             }
             enriched_rows.append(row_copy)
 
-        # 2. Ingest into Spark DataFrame using explicit StructType schema
+        # 3. Ingest into Spark DataFrame using explicit StructType schema
         df: DataFrame = self.spark.createDataFrame(enriched_rows, schema=ENRICHED_CDC_SCHEMA)
 
-        # 3. Duplicate Event ID Resolution (Exact Replay vs Conflicting Event ID)
+        # 4. Duplicate Event ID Resolution (Exact Replay vs Conflicting Event ID)
         event_id_window = Window.partitionBy("event_id")
-        event_id_order_window = Window.partitionBy("event_id").orderBy(F.col("ingestion_order").asc())
+        # Deterministic provenance ordering for exact duplicate winner selection
+        event_id_order_window = Window.partitionBy("event_id").orderBy(
+            F.col("batch_id").asc(),
+            F.col("ingestion_batch_id").asc(),
+            F.col("source_file").asc(),
+            F.col("ingestion_order").asc(),
+        )
 
         df_dup = df.withColumn(
             "distinct_fingerprints",
@@ -156,7 +196,6 @@ class SparkCDCNormalizationProcessor:
                     table_name=row["table_name"],
                     source_file=row["source_file"],
                     batch_id=row["batch_id"],
-                    quarantined_at=now_str,
                 )
             )
 
@@ -171,7 +210,7 @@ class SparkCDCNormalizationProcessor:
             (F.col("distinct_fingerprints") == 1) & (F.col("event_id_rn") == 1)
         )
 
-        # 4. Equal-Sequence Conflict Detection across the same entity
+        # 5. Equal-Sequence Conflict Detection across the same entity
         entity_seq_window = Window.partitionBy("entity_sequence_key", "sequence_number")
 
         df_seq = retained_candidates_df.withColumn(
@@ -212,14 +251,13 @@ class SparkCDCNormalizationProcessor:
                     table_name=row["table_name"],
                     source_file=row["source_file"],
                     batch_id=row["batch_id"],
-                    quarantined_at=now_str,
                 )
             )
 
-        # 5. Filter Accepted Clean Events
+        # 6. Filter Accepted Clean Events
         accepted_df = df_seq.filter(F.col("seq_collision_count") == 1)
 
-        # 6. Authoritative Deterministic Ordering: table_name, business_key_canonical, sequence_number, event_id
+        # 7. Authoritative Deterministic Ordering: table_name, business_key_canonical, sequence_number, event_id
         ordered_accepted_df = accepted_df.orderBy(
             F.col("table_name").asc(),
             F.col("business_key_canonical").asc(),
@@ -231,9 +269,6 @@ class SparkCDCNormalizationProcessor:
         accepted_events: list[NormalizedCDCEvent] = []
 
         for row in accepted_rows:
-            # Check for late arrival tag (e.g. event_id starts with evt_late or historical offset)
-            is_late = "late" in str(row["event_id"]).lower() or "late" in str(row["batch_id"]).lower()
-
             accepted_events.append(
                 NormalizedCDCEvent(
                     event_id=str(row["event_id"]),
@@ -254,8 +289,7 @@ class SparkCDCNormalizationProcessor:
                     event_fingerprint=str(row["event_fingerprint"]),
                     ingestion_batch_id=str(row["ingestion_batch_id"]),
                     source_file=str(row["source_file"]),
-                    is_late_arrival=is_late,
-                    normalized_at=now_str,
+                    is_late_arrival=bool(row["is_late_arrival"]),
                 )
             )
 

@@ -38,7 +38,7 @@ def test_read_valid_jsonl_files():
         assert len(quarantine) == 0
         assert records[0]["event_id"] == "evt_001"
         assert records[0]["ingestion_batch_id"] == "batch_001"
-        assert records[0]["source_file"] == str(acc_file)
+        assert records[0]["source_file"] == "batch_id=batch_001/accounts.jsonl"
         assert records[0]["ingestion_order"] == 1
 
 

@@ -223,3 +223,119 @@ def test_validator_business_key_payload_mismatch():
     is_valid, q_code, q_reason = validate_raw_cdc_record(record)
     assert is_valid is False
     assert q_code == QuarantineReasonCode.BUSINESS_KEY_PAYLOAD_MISMATCH
+
+
+def test_validator_insert_payload_missing_primary_key():
+    """Verify INSERT payload missing the expected PK column is quarantined."""
+    record = {
+        "event_id": "evt_001",
+        "table_name": "accounts",
+        "operation": "INSERT",
+        "business_key": {"account_id": "ACC-0001"},
+        "sequence_number": 1,
+        "event_timestamp": "2026-05-11T01:00:00Z",
+        "source_commit_timestamp": "2026-05-11T01:00:01Z",
+        "source_system": "b2b_saas_postgres",
+        "payload": {"status": "ACTIVE"},  # Missing account_id in payload
+        "before_payload": None,
+    }
+    is_valid, q_code, q_reason = validate_raw_cdc_record(record)
+    assert is_valid is False
+    assert q_code == QuarantineReasonCode.BUSINESS_KEY_PAYLOAD_MISMATCH
+    assert "missing required primary key column 'account_id'" in str(q_reason)
+
+
+def test_validator_update_payload_missing_primary_key():
+    """Verify UPDATE payload missing the expected PK column is quarantined."""
+    record = {
+        "event_id": "evt_002",
+        "table_name": "subscriptions",
+        "operation": "UPDATE",
+        "business_key": {"subscription_id": "SUB-0001"},
+        "sequence_number": 2,
+        "event_timestamp": "2026-05-11T01:00:00Z",
+        "source_commit_timestamp": "2026-05-11T01:00:01Z",
+        "source_system": "b2b_saas_postgres",
+        "payload": {"plan_name": "PRO"},  # Missing subscription_id
+        "before_payload": {"subscription_id": "SUB-0001", "plan_name": "BASIC"},
+    }
+    is_valid, q_code, q_reason = validate_raw_cdc_record(record)
+    assert is_valid is False
+    assert q_code == QuarantineReasonCode.BUSINESS_KEY_PAYLOAD_MISMATCH
+    assert "missing required primary key column 'subscription_id'" in str(q_reason)
+
+
+def test_validator_update_before_payload_missing_primary_key():
+    """Verify UPDATE before_payload missing expected PK column is quarantined."""
+    record = {
+        "event_id": "evt_003",
+        "table_name": "subscriptions",
+        "operation": "UPDATE",
+        "business_key": {"subscription_id": "SUB-0001"},
+        "sequence_number": 3,
+        "event_timestamp": "2026-05-11T01:00:00Z",
+        "source_commit_timestamp": "2026-05-11T01:00:01Z",
+        "source_system": "b2b_saas_postgres",
+        "payload": {"subscription_id": "SUB-0001", "plan_name": "PRO"},
+        "before_payload": {"plan_name": "BASIC"},  # Missing subscription_id
+    }
+    is_valid, q_code, q_reason = validate_raw_cdc_record(record)
+    assert is_valid is False
+    assert q_code == QuarantineReasonCode.BUSINESS_KEY_PAYLOAD_MISMATCH
+    assert "Before-payload is missing required primary key column 'subscription_id'" in str(q_reason)
+
+
+def test_validator_delete_before_payload_missing_primary_key():
+    """Verify DELETE before_payload missing expected PK column is quarantined."""
+    record = {
+        "event_id": "evt_004",
+        "table_name": "payments",
+        "operation": "DELETE",
+        "business_key": {"payment_id": "PAY-0001"},
+        "sequence_number": 4,
+        "event_timestamp": "2026-05-11T01:00:00Z",
+        "source_commit_timestamp": "2026-05-11T01:00:01Z",
+        "source_system": "b2b_saas_postgres",
+        "payload": None,
+        "before_payload": {"amount": "100.00"},  # Missing payment_id
+    }
+    is_valid, q_code, q_reason = validate_raw_cdc_record(record)
+    assert is_valid is False
+    assert q_code == QuarantineReasonCode.BUSINESS_KEY_PAYLOAD_MISMATCH
+    assert "Before-payload is missing required primary key column 'payment_id'" in str(q_reason)
+
+
+def test_validator_invalid_event_timestamp_format():
+    """Verify malformed event_timestamp triggers INVALID_EVENT_TIMESTAMP."""
+    record = {
+        "event_id": "evt_005",
+        "table_name": "accounts",
+        "operation": "INSERT",
+        "business_key": {"account_id": "ACC-0001"},
+        "sequence_number": 1,
+        "event_timestamp": "NOT_AN_ISO_TIMESTAMP",
+        "source_commit_timestamp": "2026-05-11T01:00:01Z",
+        "source_system": "b2b_saas_postgres",
+        "payload": {"account_id": "ACC-0001"},
+    }
+    is_valid, q_code, q_reason = validate_raw_cdc_record(record)
+    assert is_valid is False
+    assert q_code == QuarantineReasonCode.INVALID_EVENT_TIMESTAMP
+
+
+def test_validator_invalid_commit_timestamp_format():
+    """Verify malformed source_commit_timestamp triggers INVALID_COMMIT_TIMESTAMP."""
+    record = {
+        "event_id": "evt_006",
+        "table_name": "accounts",
+        "operation": "INSERT",
+        "business_key": {"account_id": "ACC-0001"},
+        "sequence_number": 1,
+        "event_timestamp": "2026-05-11T01:00:00Z",
+        "source_commit_timestamp": "INVALID_COMMIT_TIME",
+        "source_system": "b2b_saas_postgres",
+        "payload": {"account_id": "ACC-0001"},
+    }
+    is_valid, q_code, q_reason = validate_raw_cdc_record(record)
+    assert is_valid is False
+    assert q_code == QuarantineReasonCode.INVALID_COMMIT_TIMESTAMP

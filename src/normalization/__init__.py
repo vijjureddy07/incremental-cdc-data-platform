@@ -5,6 +5,8 @@ from src.normalization.fingerprint import (
     canonicalize_payload,
     compute_entity_sequence_key,
     compute_event_fingerprint,
+    compute_manifest_and_processing_id,
+    derive_logical_file_id,
     generate_processing_id,
 )
 from src.normalization.models import (
@@ -39,6 +41,8 @@ __all__ = [
     "canonicalize_payload",
     "compute_entity_sequence_key",
     "compute_event_fingerprint",
+    "compute_manifest_and_processing_id",
+    "derive_logical_file_id",
     "generate_processing_id",
     "read_normalized_accepted_jsonl",
     "read_quarantine_jsonl",

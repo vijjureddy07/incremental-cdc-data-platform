@@ -3,6 +3,7 @@
 from typing import Any
 
 from src.normalization.models import QuarantineReasonCode
+from src.utils.helpers import parse_iso_timestamp
 
 TABLE_PRIMARY_KEYS: dict[str, str] = {
     "accounts": "account_id",
@@ -83,13 +84,21 @@ def validate_raw_cdc_record(
             f"Sequence number must be a valid integer, got {record.get('sequence_number')}.",
         )
 
-    # 6. Check timestamps
+    # 6. Check timestamps and validate ISO format
     event_timestamp = record.get("event_timestamp")
     if not event_timestamp or not str(event_timestamp).strip():
         return (
             False,
             QuarantineReasonCode.MISSING_EVENT_TIMESTAMP,
             "Event is missing a valid non-empty 'event_timestamp'.",
+        )
+    try:
+        parse_iso_timestamp(str(event_timestamp))
+    except Exception as err:
+        return (
+            False,
+            QuarantineReasonCode.INVALID_EVENT_TIMESTAMP,
+            f"Malformed event_timestamp '{event_timestamp}': {err}",
         )
 
     commit_timestamp = record.get("source_commit_timestamp")
@@ -98,6 +107,14 @@ def validate_raw_cdc_record(
             False,
             QuarantineReasonCode.MISSING_COMMIT_TIMESTAMP,
             "Event is missing a valid non-empty 'source_commit_timestamp'.",
+        )
+    try:
+        parse_iso_timestamp(str(commit_timestamp))
+    except Exception as err:
+        return (
+            False,
+            QuarantineReasonCode.INVALID_COMMIT_TIMESTAMP,
+            f"Malformed source_commit_timestamp '{commit_timestamp}': {err}",
         )
 
     # 7. Check source_system
@@ -147,9 +164,19 @@ def validate_raw_cdc_record(
                 "DELETE operation must have 'payload' set to None.",
             )
 
-    # 9. Payload key consistency with business_key
+    # 9. Required Primary Key Presence and Value Consistency in Present Images
     expected_pk_val = str(business_key[expected_pk])
-    if isinstance(payload, dict) and expected_pk in payload:
+
+    if isinstance(payload, dict):
+        if expected_pk not in payload:
+            return (
+                False,
+                QuarantineReasonCode.BUSINESS_KEY_PAYLOAD_MISMATCH,
+                (
+                    f"Payload is missing required primary key column '{expected_pk}' "
+                    f"for table '{table_name}'."
+                ),
+            )
         if str(payload[expected_pk]) != expected_pk_val:
             return (
                 False,
@@ -160,7 +187,16 @@ def validate_raw_cdc_record(
                 ),
             )
 
-    if isinstance(before_payload, dict) and expected_pk in before_payload:
+    if isinstance(before_payload, dict):
+        if expected_pk not in before_payload:
+            return (
+                False,
+                QuarantineReasonCode.BUSINESS_KEY_PAYLOAD_MISMATCH,
+                (
+                    f"Before-payload is missing required primary key column '{expected_pk}' "
+                    f"for table '{table_name}'."
+                ),
+            )
         if str(before_payload[expected_pk]) != expected_pk_val:
             return (
                 False,

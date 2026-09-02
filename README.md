@@ -110,12 +110,15 @@ To prevent mid-query transaction commits from corrupting extraction windows, the
 
 Module 3 transforms raw at-least-once CDC landing files into a trustworthy, authoritative stream using **PySpark DataFrames**:
 
-1. **Exact Duplicate Replay Deduplication**: If multiple records share `event_id` and the identical SHA-256 event fingerprint, exactly one copy is accepted and redundant deliveries are dropped (`exact_duplicates_dropped`).
+1. **Exact Duplicate Replay Deduplication**: If multiple records share `event_id` and the identical SHA-256 event fingerprint, a single deterministic representative is retained (`batch_id ASC`, `ingestion_batch_id ASC`, `source_file ASC`, `ingestion_order ASC`) and redundant deliveries are dropped (`exact_duplicates_dropped`).
 2. **Conflicting Duplicate Event ID Isolation**: If the same `event_id` appears with differing semantic payloads, all conflicting records are quarantined under `DUPLICATE_EVENT_CONFLICT`.
-3. **Authoritative Entity Sequence Normalization**: Events for an entity are ordered by `sequence_number` (normalizing out-of-order arrivals 102→101 into 101→102).
+3. **Authoritative Entity Sequence Normalization**: Events for an entity are ordered strictly by `sequence_number` (normalizing out-of-order arrivals 102→101 into 101→102).
 4. **Equal-Sequence Conflict Detection**: Multiple distinct events for the same entity sharing the same sequence number are quarantined under `SEQUENCE_CONFLICT`.
-5. **Dead-Letter Quarantine Store**: Malformed JSON lines and invalid structural/semantic records are routed to `data/quarantine/processing_id=<id>/quarantine.jsonl`.
-6. **Replay Determinism**: Replaying the pipeline on identical raw files yields the exact same `processing_id` and byte-for-byte identical output.
+5. **Ingestion-Context Late Arrival Classification**: Classifies late events strictly using ingestion history and timestamp boundaries (`event_timestamp < prior_batches_max_event_timestamp`) rather than name heuristics.
+6. **Portable Content-Addressed Processing ID**: Derives `processing_id` from logical file IDs (`batch_id=<id>/<file>`) and raw SHA-256 byte digests, ensuring identical IDs across machines and root paths.
+7. **Decoupled Execution Timestamps**: Volatile run timestamps (`normalized_at`, `quarantined_at`) are excluded from `accepted.jsonl` and `quarantine.jsonl`, guaranteeing byte-for-byte identical replay outputs.
+8. **Strict Primary Key Validation**: Enforces primary key presence and matching in all payload and before-image dictionaries.
+9. **Dead-Letter Quarantine Store**: Malformed JSON lines and invalid structural/semantic records are routed to `data/quarantine/processing_id=<id>/quarantine.jsonl`.
 
 ---
 
@@ -239,7 +242,7 @@ pip install -r requirements-dev.txt
 pip install -e .
 ```
 
-### Run Full Test Suite (100 tests)
+### Run Full Test Suite (115 tests)
 
 ```bash
 pytest -v

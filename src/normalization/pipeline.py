@@ -1,5 +1,7 @@
 """Orchestrator pipeline for end-to-end PySpark CDC normalization, deduplication, and quarantine routing."""
 
+import hashlib
+import json
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -7,7 +9,7 @@ from typing import Any
 
 from pyspark.sql import SparkSession
 
-from src.normalization.fingerprint import generate_processing_id
+from src.normalization.fingerprint import compute_manifest_and_processing_id
 from src.normalization.models import (
     NormalizationAuditMetrics,
     NormalizedCDCEvent,
@@ -45,9 +47,9 @@ class CDCNormalizationPipeline:
         started_at = format_iso_timestamp(datetime.now(UTC))
         run_id = f"run_norm_{uuid.uuid4().hex[:12]}"
 
-        # Resolve deterministic processing_id from stable input file names/paths
-        clean_file_paths = [str(Path(p).resolve()) for p in file_paths if Path(p).exists()]
-        processing_id = generate_processing_id(clean_file_paths)
+        # Resolve deterministic content-addressed processing_id from logical file IDs + content hashes
+        clean_file_paths = [Path(p) for p in file_paths if Path(p).exists()]
+        processing_id, manifest_entries = compute_manifest_and_processing_id(clean_file_paths)
 
         # Step 1: Read raw files and isolate malformed JSON lines
         parsed_records, malformed_quarantine = read_raw_cdc_files(clean_file_paths)
@@ -56,7 +58,6 @@ class CDCNormalizationPipeline:
         valid_records: list[dict[str, Any]] = []
         validation_quarantine: list[QuarantinedEvent] = []
 
-        now_str = format_iso_timestamp(datetime.now(UTC))
         for r in parsed_records:
             is_valid, q_code, q_reason = validate_raw_cdc_record(r)
             if is_valid:
@@ -71,7 +72,6 @@ class CDCNormalizationPipeline:
                         table_name=r.get("table_name"),
                         source_file=r.get("source_file"),
                         batch_id=r.get("batch_id"),
-                        quarantined_at=now_str,
                     )
                 )
 
@@ -85,14 +85,23 @@ class CDCNormalizationPipeline:
             malformed_quarantine + validation_quarantine + spark_quarantine
         )
 
-        # Sort quarantined events deterministically
-        all_quarantine.sort(
-            key=lambda q: (
+        # Sort quarantined events deterministically using content digest for tie-breaking
+        def _quarantine_sort_key(q: QuarantinedEvent) -> tuple[str, str, str, str, str]:
+            raw_str = (
+                json.dumps(q.raw_record, sort_keys=True)
+                if isinstance(q.raw_record, dict)
+                else str(q.raw_record or "")
+            )
+            content_digest = hashlib.sha256(raw_str.encode("utf-8")).hexdigest()
+            return (
                 str(q.table_name or ""),
                 str(q.event_id or ""),
                 str(q.quarantine_code),
+                content_digest,
+                str(q.source_file or ""),
             )
-        )
+
+        all_quarantine.sort(key=_quarantine_sort_key)
 
         # Step 5: Write outputs to deterministic partition directories
         if accepted_events:
@@ -134,7 +143,7 @@ class CDCNormalizationPipeline:
         metrics = NormalizationAuditMetrics(
             run_id=run_id,
             processing_id=processing_id,
-            files_read=clean_file_paths,
+            files_read=[str(p) for p in clean_file_paths],
             raw_records_seen=raw_seen,
             parsed_records=len(parsed_records),
             accepted_records=len(accepted_events),

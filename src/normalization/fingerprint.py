@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import re
+from pathlib import Path
 from typing import Any
 
 
@@ -54,7 +56,7 @@ def compute_event_fingerprint(event_data: dict[str, Any]) -> str:
     """Compute a deterministic SHA-256 fingerprint over semantic, replay-stable event fields.
 
     Excluded metadata fields:
-    - ingestion_batch_id, source_file, ingestion_order, normalized_at, Spark partition IDs.
+    - ingestion_batch_id, source_file, ingestion_order, Spark partition IDs.
     """
     stable_parts = [
         str(event_data.get("event_id", "")),
@@ -72,8 +74,53 @@ def compute_event_fingerprint(event_data: dict[str, Any]) -> str:
     return hashlib.sha256(raw_str.encode("utf-8")).hexdigest()
 
 
-def generate_processing_id(input_identifiers: list[str]) -> str:
-    """Generate deterministic processing_id from a stable, sorted set of input file paths or hashes."""
+def derive_logical_file_id(path: Path | str) -> str:
+    """Derive a portable logical file identifier (e.g. batch_id=batch_001/accounts.jsonl)."""
+    path_str = str(path)
+    match = re.search(r"batch_id=([^/\\]+)[/\\]([^/\\]+\.jsonl)", path_str)
+    if match:
+        return f"batch_id={match.group(1)}/{match.group(2)}"
+
+    p = Path(path)
+    if p.parent.name.startswith("batch_id="):
+        return f"{p.parent.name}/{p.name}"
+
+    return f"{p.parent.name}/{p.name}" if p.parent.name else p.name
+
+
+def compute_manifest_and_processing_id(
+    file_paths: list[str | Path],
+) -> tuple[str, list[str]]:
+    """Compute deterministic processing_id and sorted manifest from logical file IDs and raw byte digests.
+
+    Guarantees:
+    - Same logical files + same bytes = same processing_id (independent of temp/root directories).
+    - Changed bytes = different processing_id.
+    - Input list order does not affect processing_id.
+    """
+    manifest_map: dict[str, str] = {}
+    for p in file_paths:
+        path = Path(p)
+        if not path.exists():
+            continue
+        logical_id = derive_logical_file_id(path)
+        content_bytes = path.read_bytes()
+        file_sha256 = hashlib.sha256(content_bytes).hexdigest()
+        manifest_map[logical_id] = file_sha256
+
+    sorted_manifest = [f"{k}:{v}" for k, v in sorted(manifest_map.items())]
+    combined = "\n".join(sorted_manifest)
+    digest = hashlib.sha256(combined.encode("utf-8")).hexdigest()[:16]
+    return f"proc_{digest}", sorted_manifest
+
+
+def generate_processing_id(input_identifiers: list[str | Path]) -> str:
+    """Generate deterministic processing_id, supporting paths (content-addressed) and identifiers."""
+    paths = [Path(x) for x in input_identifiers if Path(x).exists()]
+    if paths:
+        proc_id, _ = compute_manifest_and_processing_id(paths)
+        return proc_id
+
     sorted_inputs = sorted({str(x) for x in input_identifiers})
     combined = "\n".join(sorted_inputs)
     digest = hashlib.sha256(combined.encode("utf-8")).hexdigest()[:16]

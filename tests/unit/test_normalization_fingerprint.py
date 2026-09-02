@@ -1,10 +1,14 @@
-"""Unit tests for canonical business key formatting and deterministic SHA-256 event fingerprinting."""
+"""Unit tests for canonical business key formatting, event fingerprinting, and portable processing ID."""
+
+import tempfile
+from pathlib import Path
 
 from src.normalization.fingerprint import (
     canonicalize_business_key,
     compute_entity_sequence_key,
     compute_event_fingerprint,
-    generate_processing_id,
+    compute_manifest_and_processing_id,
+    derive_logical_file_id,
 )
 
 
@@ -87,13 +91,67 @@ def test_fingerprint_differs_on_sequence_change():
     assert compute_event_fingerprint(event_seq1) != compute_event_fingerprint(event_seq2)
 
 
-def test_generate_processing_id_stability():
-    """Verify generate_processing_id produces identical deterministic hashes regardless of input path ordering."""
-    paths1 = ["/data/batch_001/accounts.jsonl", "/data/batch_001/subscriptions.jsonl"]
-    paths2 = ["/data/batch_001/subscriptions.jsonl", "/data/batch_001/accounts.jsonl"]
+def test_derive_logical_file_id():
+    """Verify logical file ID derivation extracts batch_id and table name portably."""
+    path1 = Path("/tmp/somedir/cdc_landing/batch_id=batch_001/accounts.jsonl")
+    assert derive_logical_file_id(path1) == "batch_id=batch_001/accounts.jsonl"
 
-    proc_id1 = generate_processing_id(paths1)
-    proc_id2 = generate_processing_id(paths2)
+    path2 = Path("data/cdc_landing/batch_id=batch_002/subscriptions.jsonl")
+    assert derive_logical_file_id(path2) == "batch_id=batch_002/subscriptions.jsonl"
 
-    assert proc_id1 == proc_id2
-    assert proc_id1.startswith("proc_")
+
+def test_processing_id_input_list_order_independence():
+    """Verify processing_id is identical regardless of the order input files are passed."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        b_dir = Path(tmpdir) / "batch_id=batch_001"
+        b_dir.mkdir(parents=True)
+        f1 = b_dir / "accounts.jsonl"
+        f2 = b_dir / "subscriptions.jsonl"
+        f1.write_text('{"event_id":"e1"}\n', encoding="utf-8")
+        f2.write_text('{"event_id":"e2"}\n', encoding="utf-8")
+
+        proc_id1, _ = compute_manifest_and_processing_id([f1, f2])
+        proc_id2, _ = compute_manifest_and_processing_id([f2, f1])
+
+        assert proc_id1 == proc_id2
+        assert proc_id1.startswith("proc_")
+
+
+def test_processing_id_root_directory_independence():
+    """Verify copying identical logical files into two different temp root directories yields the same processing_id."""
+    with tempfile.TemporaryDirectory() as tmpdir1, tempfile.TemporaryDirectory() as tmpdir2:
+        # Directory 1 on Machine A
+        b_dir1 = Path(tmpdir1) / "landing" / "batch_id=batch_001"
+        b_dir1.mkdir(parents=True)
+        f1 = b_dir1 / "accounts.jsonl"
+        f1.write_text('{"event_id":"e1","table_name":"accounts"}\n', encoding="utf-8")
+
+        # Directory 2 on Machine B
+        b_dir2 = Path(tmpdir2) / "var" / "other_mount" / "batch_id=batch_001"
+        b_dir2.mkdir(parents=True)
+        f2 = b_dir2 / "accounts.jsonl"
+        f2.write_text('{"event_id":"e1","table_name":"accounts"}\n', encoding="utf-8")
+
+        proc_id1, manifest1 = compute_manifest_and_processing_id([f1])
+        proc_id2, manifest2 = compute_manifest_and_processing_id([f2])
+
+        assert proc_id1 == proc_id2
+        assert manifest1 == manifest2
+        assert manifest1 == ["batch_id=batch_001/accounts.jsonl:" + f1.read_text().strip().encode().hex()[:0] + manifest1[0].split(":")[1]]
+
+
+def test_processing_id_content_change_sensitivity():
+    """Verify modifying file contents produces a different processing_id for the same logical path."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        b_dir = Path(tmpdir) / "batch_id=batch_001"
+        b_dir.mkdir(parents=True)
+        f1 = b_dir / "accounts.jsonl"
+        f1.write_text('{"event_id":"e1"}\n', encoding="utf-8")
+
+        proc_id1, _ = compute_manifest_and_processing_id([f1])
+
+        # Modify one byte
+        f1.write_text('{"event_id":"e1_mutated"}\n', encoding="utf-8")
+        proc_id2, _ = compute_manifest_and_processing_id([f1])
+
+        assert proc_id1 != proc_id2

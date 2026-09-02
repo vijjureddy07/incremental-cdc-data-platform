@@ -16,7 +16,9 @@ class QuarantineReasonCode(StrEnum):
     MISSING_SEQUENCE = "MISSING_SEQUENCE"
     INVALID_SEQUENCE = "INVALID_SEQUENCE"
     MISSING_EVENT_TIMESTAMP = "MISSING_EVENT_TIMESTAMP"
+    INVALID_EVENT_TIMESTAMP = "INVALID_EVENT_TIMESTAMP"
     MISSING_COMMIT_TIMESTAMP = "MISSING_COMMIT_TIMESTAMP"
+    INVALID_COMMIT_TIMESTAMP = "INVALID_COMMIT_TIMESTAMP"
     MISSING_SOURCE_SYSTEM = "MISSING_SOURCE_SYSTEM"
     MISSING_PAYLOAD = "MISSING_PAYLOAD"
     MISSING_BEFORE_IMAGE = "MISSING_BEFORE_IMAGE"
@@ -48,10 +50,9 @@ class NormalizedCDCEvent:
     ingestion_batch_id: str
     source_file: str
     is_late_arrival: bool = False
-    normalized_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert normalized event to a standard Python dictionary."""
+        """Convert normalized event to a deterministic dictionary excluding volatile runtime timestamps."""
         return {
             "event_id": self.event_id,
             "table_name": self.table_name,
@@ -70,7 +71,6 @@ class NormalizedCDCEvent:
             "ingestion_batch_id": self.ingestion_batch_id,
             "source_file": self.source_file,
             "is_late_arrival": self.is_late_arrival,
-            "normalized_at": self.normalized_at,
         }
 
     @classmethod
@@ -94,7 +94,6 @@ class NormalizedCDCEvent:
             ingestion_batch_id=str(data.get("ingestion_batch_id", "")),
             source_file=str(data.get("source_file", "")),
             is_late_arrival=bool(data.get("is_late_arrival", False)),
-            normalized_at=str(data.get("normalized_at", "")),
         )
 
 
@@ -109,10 +108,9 @@ class QuarantinedEvent:
     table_name: str | None = None
     source_file: str | None = None
     batch_id: str | None = None
-    quarantined_at: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert quarantined event to standard dictionary."""
+        """Convert quarantined event to deterministic dictionary excluding volatile runtime timestamps."""
         return {
             "quarantine_code": (
                 self.quarantine_code.value
@@ -125,7 +123,6 @@ class QuarantinedEvent:
             "table_name": self.table_name,
             "source_file": self.source_file,
             "batch_id": self.batch_id,
-            "quarantined_at": self.quarantined_at,
         }
 
 

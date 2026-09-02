@@ -2,6 +2,7 @@
 
 import json
 import tempfile
+import time
 from pathlib import Path
 
 from pyspark.sql import SparkSession
@@ -207,7 +208,7 @@ def test_normalization_pipeline_combined_lifecycle_reconciliation(spark_session:
 
 
 def test_normalization_pipeline_replay_determinism(spark_session: SparkSession):
-    """Verify that executing the pipeline twice against the exact same input produces identical deterministic outputs."""
+    """Verify executing pipeline twice against same input produces identical processing_id and fingerprints."""
     with tempfile.TemporaryDirectory() as tmpdir:
         base_dir = Path(tmpdir)
         landing_dir = base_dir / "cdc_landing"
@@ -259,3 +260,138 @@ def test_normalization_pipeline_deterministic_output_ordering(spark_session: Spa
         # Table names must appear in alphabetical order (accounts, invoices, payments, subscriptions)
         table_names = [e.table_name for e in accepted]
         assert table_names == sorted(table_names)
+
+
+def test_normalization_pipeline_reversed_input_replay(spark_session: SparkSession):
+    """Verify passing files in forward order vs reverse order yields identical accepted/quarantine logical output."""
+    with tempfile.TemporaryDirectory() as tmpdir1, tempfile.TemporaryDirectory() as tmpdir2:
+        # Env 1: Forward order
+        base1 = Path(tmpdir1)
+        cdc_gen = CDCScenarioGenerator(SourceGenerator(SnapshotConfig(seed=42)))
+        b1_events = [e.to_dict() for e in cdc_gen.generate_batch_1_inserts_and_updates("batch_001")]
+        b2_events = [e.to_dict() for e in cdc_gen.generate_batch_2_advanced_cdc_scenarios("batch_002")]
+
+        files1_b1 = write_cdc_events_to_landing_dir(b1_events, base1 / "cdc_landing", "batch_001")
+        files1_b2 = write_cdc_events_to_landing_dir(b2_events, base1 / "cdc_landing", "batch_002")
+        forward_files = files1_b1 + files1_b2
+
+        p1 = CDCNormalizationPipeline(
+            spark=spark_session,
+            normalized_base_dir=base1 / "norm",
+            quarantine_base_dir=base1 / "quar",
+        )
+        acc1, q1, m1 = p1.run_pipeline(forward_files)
+
+        # Env 2: Reversed order
+        base2 = Path(tmpdir2)
+        files2_b1 = write_cdc_events_to_landing_dir(b1_events, base2 / "cdc_landing", "batch_001")
+        files2_b2 = write_cdc_events_to_landing_dir(b2_events, base2 / "cdc_landing", "batch_002")
+        reversed_files = list(reversed(files2_b2 + files2_b1))
+
+        p2 = CDCNormalizationPipeline(
+            spark=spark_session,
+            normalized_base_dir=base2 / "norm",
+            quarantine_base_dir=base2 / "quar",
+        )
+        acc2, q2, m2 = p2.run_pipeline(reversed_files)
+
+        # Must have identical processing_id
+        assert m1.processing_id == m2.processing_id
+
+        # Must have identical accepted events
+        assert [e.to_dict() for e in acc1] == [e.to_dict() for e in acc2]
+
+
+def test_normalization_pipeline_reversed_duplicate_conflict_quarantine_order(spark_session: SparkSession):
+    """Verify conflicting duplicate events produce identical quarantine ordering regardless of file/input order."""
+    with tempfile.TemporaryDirectory() as tmpdir1, tempfile.TemporaryDirectory() as tmpdir2:
+        # Create 2 conflicting events with same event_id but different payloads
+        ev_conf_a = {
+            "event_id": "evt_conf_same_id",
+            "table_name": "accounts",
+            "operation": "UPDATE",
+            "business_key": {"account_id": "ACC-0001"},
+            "sequence_number": 10,
+            "event_timestamp": "2026-05-11T01:30:00Z",
+            "source_commit_timestamp": "2026-05-11T01:30:02Z",
+            "batch_id": "batch_001",
+            "payload": {"account_id": "ACC-0001", "status": "ACTIVE"},
+            "before_payload": {"account_id": "ACC-0001", "status": "SUSPENDED"},
+            "source_system": "b2b_saas_postgres",
+        }
+        ev_conf_b = dict(ev_conf_a)
+        ev_conf_b["payload"] = {"account_id": "ACC-0001", "status": "TRIAL"}
+        ev_conf_b["batch_id"] = "batch_002"
+
+        # Env 1: A then B
+        base1 = Path(tmpdir1)
+        f1_a = base1 / "cdc_landing" / "batch_id=batch_001" / "accounts.jsonl"
+        f1_a.parent.mkdir(parents=True)
+        f1_a.write_text(json.dumps(ev_conf_a) + "\n", encoding="utf-8")
+        f1_b = base1 / "cdc_landing" / "batch_id=batch_002" / "accounts.jsonl"
+        f1_b.parent.mkdir(parents=True)
+        f1_b.write_text(json.dumps(ev_conf_b) + "\n", encoding="utf-8")
+
+        p1 = CDCNormalizationPipeline(spark=spark_session, normalized_base_dir=base1 / "norm", quarantine_base_dir=base1 / "quar")
+        _, q1, _ = p1.run_pipeline([f1_a, f1_b])
+
+        # Env 2: B then A (reversed input order)
+        base2 = Path(tmpdir2)
+        f2_a = base2 / "cdc_landing" / "batch_id=batch_001" / "accounts.jsonl"
+        f2_a.parent.mkdir(parents=True)
+        f2_a.write_text(json.dumps(ev_conf_a) + "\n", encoding="utf-8")
+        f2_b = base2 / "cdc_landing" / "batch_id=batch_002" / "accounts.jsonl"
+        f2_b.parent.mkdir(parents=True)
+        f2_b.write_text(json.dumps(ev_conf_b) + "\n", encoding="utf-8")
+
+        p2 = CDCNormalizationPipeline(spark=spark_session, normalized_base_dir=base2 / "norm", quarantine_base_dir=base2 / "quar")
+        _, q2, _ = p2.run_pipeline([f2_b, f2_a])
+
+        assert len(q1) == 2
+        assert len(q2) == 2
+        assert [q.to_dict() for q in q1] == [q.to_dict() for q in q2]
+
+
+def test_normalization_pipeline_byte_level_replay_determinism(spark_session: SparkSession):
+    """Verify executing the pipeline twice against the same input produces byte-for-byte identical output files."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        base_dir = Path(tmpdir)
+        landing_dir = base_dir / "cdc_landing"
+        norm_dir = base_dir / "normalized_cdc"
+        quarantine_dir = base_dir / "quarantine"
+
+        cdc_gen = CDCScenarioGenerator(SourceGenerator(SnapshotConfig(seed=42)))
+        all_batches = cdc_gen.generate_all_batches()
+
+        all_files: list[Path] = []
+        for b_id, events in all_batches.items():
+            dict_events = [e.to_dict() if hasattr(e, "to_dict") else e for e in events]
+            all_files.extend(write_cdc_events_to_landing_dir(dict_events, landing_dir, b_id))
+
+        pipeline = CDCNormalizationPipeline(
+            spark=spark_session,
+            normalized_base_dir=norm_dir,
+            quarantine_base_dir=quarantine_dir,
+        )
+
+        # Run 1
+        _, _, m1 = pipeline.run_pipeline(all_files)
+        acc_file_1 = norm_dir / f"processing_id={m1.processing_id}" / "accepted.jsonl"
+        quar_file_1 = quarantine_dir / f"processing_id={m1.processing_id}" / "quarantine.jsonl"
+        acc_bytes_1 = acc_file_1.read_bytes()
+        quar_bytes_1 = quar_file_1.read_bytes()
+
+        # Small sleep to guarantee wall-clock advancement
+        time.sleep(0.05)
+
+        # Run 2
+        _, _, m2 = pipeline.run_pipeline(all_files)
+        acc_file_2 = norm_dir / f"processing_id={m2.processing_id}" / "accepted.jsonl"
+        quar_file_2 = quarantine_dir / f"processing_id={m2.processing_id}" / "quarantine.jsonl"
+        acc_bytes_2 = acc_file_2.read_bytes()
+        quar_bytes_2 = quar_file_2.read_bytes()
+
+        assert m1.processing_id == m2.processing_id
+        # Byte-for-byte identical contents
+        assert acc_bytes_1 == acc_bytes_2
+        assert quar_bytes_1 == quar_bytes_2
