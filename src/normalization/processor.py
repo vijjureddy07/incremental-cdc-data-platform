@@ -123,7 +123,9 @@ class SparkCDCNormalizationProcessor:
                 "source_commit_timestamp": str(r.get("source_commit_timestamp", "")),
                 "batch_id": str(r.get("batch_id", "")),
                 "payload_json": (
-                    json.dumps(r["payload"], sort_keys=True) if r.get("payload") is not None else None
+                    json.dumps(r["payload"], sort_keys=True)
+                    if r.get("payload") is not None
+                    else None
                 ),
                 "before_payload_json": (
                     json.dumps(r["before_payload"], sort_keys=True)
@@ -152,15 +154,19 @@ class SparkCDCNormalizationProcessor:
             F.col("ingestion_order").asc(),
         )
 
-        df_dup = df.withColumn(
-            "distinct_fingerprints",
-            F.size(F.collect_set("event_fingerprint").over(event_id_window)),
-        ).withColumn(
-            "total_event_id_count",
-            F.count(F.lit(1)).over(event_id_window),
-        ).withColumn(
-            "event_id_rn",
-            F.row_number().over(event_id_order_window),
+        df_dup = (
+            df.withColumn(
+                "distinct_fingerprints",
+                F.size(F.collect_set("event_fingerprint").over(event_id_window)),
+            )
+            .withColumn(
+                "total_event_id_count",
+                F.count(F.lit(1)).over(event_id_window),
+            )
+            .withColumn(
+                "event_id_rn",
+                F.row_number().over(event_id_order_window),
+            )
         )
 
         # Conflicting duplicate event_id (same event_id, different fingerprint) -> Quarantine all
@@ -201,7 +207,9 @@ class SparkCDCNormalizationProcessor:
 
         # Exact duplicate deliveries (same event_id, same fingerprint) -> drop redundant copies (rn > 1)
         exact_duplicates_df = df_dup.filter(
-            (F.col("distinct_fingerprints") == 1) & (F.col("total_event_id_count") > 1) & (F.col("event_id_rn") > 1)
+            (F.col("distinct_fingerprints") == 1)
+            & (F.col("total_event_id_count") > 1)
+            & (F.col("event_id_rn") > 1)
         )
         exact_duplicates_dropped = exact_duplicates_df.count()
 
@@ -284,7 +292,9 @@ class SparkCDCNormalizationProcessor:
                     source_system=str(row["source_system"]),
                     payload=json.loads(row["payload_json"]) if row["payload_json"] else None,
                     before_payload=(
-                        json.loads(row["before_payload_json"]) if row["before_payload_json"] else None
+                        json.loads(row["before_payload_json"])
+                        if row["before_payload_json"]
+                        else None
                     ),
                     event_fingerprint=str(row["event_fingerprint"]),
                     ingestion_batch_id=str(row["ingestion_batch_id"]),

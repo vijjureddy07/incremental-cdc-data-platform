@@ -72,10 +72,9 @@ def test_delete_before_image_derives_from_actual_source_snapshot(
 
 def test_updates_preserve_unchanged_columns(cdc_gen: CDCScenarioGenerator):
     """Verify that for every UPDATE, all untouched columns remain identical between before and after (Test F)."""
-    all_events = (
-        cdc_gen.generate_batch_1_inserts_and_updates("batch_001")
-        + cdc_gen.generate_batch_2_advanced_cdc_scenarios("batch_002")
-    )
+    all_events = cdc_gen.generate_batch_1_inserts_and_updates(
+        "batch_001"
+    ) + cdc_gen.generate_batch_2_advanced_cdc_scenarios("batch_002")
     updates = [e for e in all_events if e.operation == CDCOperation.UPDATE.value]
 
     for ev in updates:
@@ -106,10 +105,9 @@ def test_updates_preserve_unchanged_columns(cdc_gen: CDCScenarioGenerator):
 
 def test_updates_advance_updated_at_timestamp(cdc_gen: CDCScenarioGenerator):
     """Verify that every UPDATE advances updated_at with a later timestamp (Test G)."""
-    all_events = (
-        cdc_gen.generate_batch_1_inserts_and_updates("batch_001")
-        + cdc_gen.generate_batch_2_advanced_cdc_scenarios("batch_002")
-    )
+    all_events = cdc_gen.generate_batch_1_inserts_and_updates(
+        "batch_001"
+    ) + cdc_gen.generate_batch_2_advanced_cdc_scenarios("batch_002")
     updates = [e for e in all_events if e.operation == CDCOperation.UPDATE.value]
 
     for ev in updates:

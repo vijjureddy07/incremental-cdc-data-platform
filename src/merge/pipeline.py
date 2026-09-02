@@ -7,7 +7,10 @@ from typing import Any
 
 from pyspark.sql import SparkSession
 
-from src.merge.event_adapter import load_accepted_events_from_file
+from src.merge.event_adapter import (
+    extract_processing_id_from_path,
+    load_accepted_events_from_file,
+)
 from src.merge.event_ledger import EventApplyLedger
 from src.merge.merge_engine import DeltaMergeEngine
 from src.merge.models import (
@@ -50,11 +53,33 @@ class DeltaMergePipeline:
         fail_after_pending_group: int | None = None,
         fail_after_target_group: int | None = None,
     ) -> MergePipelineResult:
-        """Execute the pipeline from a Module 3 accepted.jsonl file."""
-        events = load_accepted_events_from_file(accepted_jsonl_path)
+        """Execute the pipeline from a Module 3 accepted.jsonl file.
+
+        Derives processing_id from the path (processing_id=<id>/accepted.jsonl) if not explicitly provided.
+
+        Raises:
+            FileNotFoundError: If accepted_jsonl_path does not exist.
+            ValueError: If processing_id is omitted and cannot be derived from path.
+        """
+        path = Path(accepted_jsonl_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Accepted events file not found at: {path}")
+
+        if processing_id and processing_id.strip():
+            proc_id = processing_id.strip()
+        else:
+            derived_id = extract_processing_id_from_path(path)
+            if not derived_id:
+                raise ValueError(
+                    f"Could not derive processing_id from path '{path}'. "
+                    f"Provide an explicit processing_id or use a 'processing_id=<id>' directory structure."
+                )
+            proc_id = derived_id
+
+        events = load_accepted_events_from_file(path)
         return self.run(
             events=events,
-            processing_id=processing_id,
+            processing_id=proc_id,
             fail_after_pending_group=fail_after_pending_group,
             fail_after_target_group=fail_after_target_group,
         )
@@ -62,38 +87,63 @@ class DeltaMergePipeline:
     def run(
         self,
         events: list[NormalizedCDCEvent],
-        processing_id: str | None = None,
+        processing_id: str,
         fail_after_pending_group: int | None = None,
         fail_after_target_group: int | None = None,
     ) -> MergePipelineResult:
-        """Execute two-phase Delta MERGE across a list of accepted NormalizedCDCEvents."""
-        run_id = f"run_merge_{uuid.uuid4().hex[:12]}"
-        proc_id = processing_id or "proc_delta"
+        """Execute two-phase Delta MERGE across a list of accepted NormalizedCDCEvents.
 
-        # Step 1: Check existing ledger for PENDING records (recovery verification)
+        Args:
+            events: List of canonical accepted normalized CDC events.
+            processing_id: Required deterministic identifier of the input processing set.
+            fail_after_pending_group: Test hook to inject failure after writing PENDING.
+            fail_after_target_group: Test hook to inject failure after target mutation.
+
+        Raises:
+            ValueError: If processing_id is empty or not provided.
+            PendingRecoveryError: If unresolved PENDING records exist that do not match current processing set.
+            AppliedEventConflictError: If an event ID has conflicting fingerprints across runs.
+            AppliedSequenceConflictError: If an entity has duplicate equal-sequence numbers across runs.
+            MergeAmbiguityError: If multiple events target the same primary key in a single wave.
+        """
+        if not processing_id or not isinstance(processing_id, str) or not processing_id.strip():
+            raise ValueError("A non-empty processing_id is required for direct run() calls.")
+
+        proc_id = processing_id.strip()
+        run_id = f"run_merge_{uuid.uuid4().hex[:12]}"
+
+        # Step 1: Check existing ledger for PENDING records (recovery & ownership verification)
         existing_pending = self.event_ledger.get_pending_records()
-        incoming_event_ids = {e.event_id for e in events}
         incoming_events_by_id = {e.event_id: e for e in events}
 
         if existing_pending:
-            # If there are pending events in the ledger, verify that incoming events cover them
-            pending_ids = {p.event_id for p in existing_pending}
-            unresolved = pending_ids - incoming_event_ids
-            if unresolved:
+            # All existing PENDING records must belong to the current processing_id
+            foreign_pending = [p for p in existing_pending if p.processing_id != proc_id]
+            if foreign_pending:
+                foreign_p = foreign_pending[0]
                 raise PendingRecoveryError(
-                    f"Cannot process new events: ledger contains {len(unresolved)} unresolved PENDING events "
-                    f"(IDs: {sorted(unresolved)[:3]}...) from prior interrupted runs."
+                    f"Cannot adopt PENDING recovery: ledger contains {len(foreign_pending)} PENDING event(s) "
+                    f"belonging to processing_id '{foreign_p.processing_id}' (e.g. event_id='{foreign_p.event_id}'), "
+                    f"which cannot be adopted by current processing_id '{proc_id}'."
                 )
 
-            # Also verify fingerprints match for the pending events
+            # Every existing PENDING event_id must exist in the retry input
+            pending_ids = {p.event_id for p in existing_pending}
+            unresolved = pending_ids - set(incoming_events_by_id.keys())
+            if unresolved:
+                raise PendingRecoveryError(
+                    f"Interrupted processing set '{proc_id}' cannot be recovered: {len(unresolved)} "
+                    f"PENDING event(s) missing from retry input (e.g. IDs: {sorted(unresolved)[:3]})."
+                )
+
+            # Fingerprints must match for all pending events in retry input
             for p in existing_pending:
-                if p.event_id in incoming_events_by_id:
-                    incoming_fp = incoming_events_by_id[p.event_id].event_fingerprint
-                    if p.event_fingerprint != incoming_fp:
-                        raise AppliedEventConflictError(
-                            f"PENDING event {p.event_id} has conflicting fingerprint in retry input: "
-                            f"ledger='{p.event_fingerprint}' vs incoming='{incoming_fp}'"
-                        )
+                incoming_ev = incoming_events_by_id[p.event_id]
+                if p.event_fingerprint != incoming_ev.event_fingerprint:
+                    raise AppliedEventConflictError(
+                        f"PENDING event '{p.event_id}' has conflicting fingerprint in retry input: "
+                        f"ledger='{p.event_fingerprint}' vs incoming='{incoming_ev.event_fingerprint}'."
+                    )
 
         # Step 2: Classify incoming events against ledger history
         applied_max_seqs = self.event_ledger.get_applied_max_sequences()
@@ -116,13 +166,17 @@ class DeltaMergePipeline:
                             f"'{existing_rec.event_fingerprint}', conflicting with incoming fingerprint '{ev.event_fingerprint}'."
                         )
                 elif existing_rec.status == LedgerStatus.PENDING.value:
-                    if existing_rec.event_fingerprint == ev.event_fingerprint:
-                        recovery_events.append(ev)
-                    else:
+                    if existing_rec.event_fingerprint != ev.event_fingerprint:
                         raise AppliedEventConflictError(
                             f"Event ID '{ev.event_id}' is PENDING with fingerprint "
                             f"'{existing_rec.event_fingerprint}', conflicting with incoming fingerprint '{ev.event_fingerprint}'."
                         )
+                    if existing_rec.processing_id != proc_id:
+                        raise PendingRecoveryError(
+                            f"Event ID '{ev.event_id}' is PENDING under processing_id '{existing_rec.processing_id}', "
+                            f"and cannot be recovered by processing_id '{proc_id}'."
+                        )
+                    recovery_events.append(ev)
             else:
                 # Not in ledger: check entity sequence history
                 entity_max = applied_max_seqs.get(ev.entity_sequence_key)
@@ -144,7 +198,11 @@ class DeltaMergePipeline:
         # If no actionable events, return early with no Delta MERGE mutations
         if not actionable_events:
             pending_count = len(self.event_ledger.get_pending_records())
-            status = "SUCCESS_WITH_SKIPS" if (replay_events_skipped or stale_events_skipped) else "SUCCESS"
+            status = (
+                "SUCCESS_WITH_SKIPS"
+                if (replay_events_skipped or stale_events_skipped)
+                else "SUCCESS"
+            )
             return MergePipelineResult(
                 run_id=run_id,
                 processing_id=proc_id,
@@ -193,7 +251,7 @@ class DeltaMergePipeline:
             table_name, _ = key
             group_events = waves_by_key[key]
 
-            # Phase A: Persist PENDING intent in ledger
+            # Phase A: Persist PENDING intent in ledger (immutable if already exists)
             self.event_ledger.record_pending_events(group_events, processing_id=proc_id)
 
             # Failure hook 1: fail after writing PENDING
@@ -202,7 +260,7 @@ class DeltaMergePipeline:
                     f"Test failure injected: Simulated crash after writing PENDING for group {group_idx}."
                 )
 
-            # Phase C: Apply Target Mutation(s) via Delta MERGE
+            # Phase B: Apply Target Mutation(s) via Delta MERGE
             ins, upd, dels = self.merge_engine.merge_wave(
                 table_name=table_name,
                 events=group_events,
@@ -219,13 +277,15 @@ class DeltaMergePipeline:
                     f"Test failure injected: Simulated crash after target mutation for group {group_idx}."
                 )
 
-            # Phase E: Mark events as APPLIED in ledger
+            # Phase C: Mark events as APPLIED in ledger
             event_ids = [e.event_id for e in group_events]
             self.event_ledger.mark_events_applied(event_ids)
             groups_completed += 1
 
         pending_remaining = len(self.event_ledger.get_pending_records())
-        status = "SUCCESS_WITH_SKIPS" if (replay_events_skipped or stale_events_skipped) else "SUCCESS"
+        status = (
+            "SUCCESS_WITH_SKIPS" if (replay_events_skipped or stale_events_skipped) else "SUCCESS"
+        )
 
         return MergePipelineResult(
             run_id=run_id,

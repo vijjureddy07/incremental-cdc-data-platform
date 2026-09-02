@@ -26,7 +26,11 @@ def validate_raw_cdc_record(
     # 1. Check event_id
     event_id = record.get("event_id")
     if not event_id or not str(event_id).strip():
-        return False, QuarantineReasonCode.MISSING_EVENT_ID, "Event is missing a valid non-empty 'event_id'."
+        return (
+            False,
+            QuarantineReasonCode.MISSING_EVENT_ID,
+            "Event is missing a valid non-empty 'event_id'.",
+        )
 
     # 2. Check table_name
     table_name = record.get("table_name")
@@ -68,7 +72,11 @@ def validate_raw_cdc_record(
 
     # 5. Check sequence_number
     if "sequence_number" not in record or record["sequence_number"] is None:
-        return False, QuarantineReasonCode.MISSING_SEQUENCE, "Event is missing required 'sequence_number' field."
+        return (
+            False,
+            QuarantineReasonCode.MISSING_SEQUENCE,
+            "Event is missing required 'sequence_number' field.",
+        )
     try:
         seq_num = int(record["sequence_number"])
         if seq_num <= 0:

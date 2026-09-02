@@ -64,7 +64,9 @@ def test_full_simulation_lifecycle():
 
         # Apply Batch 2
         res_b2 = engine.apply_batch(batch_2, sort_by_sequence=True)
-        assert res_b2.applied_count == 4  # 4 applied (del, late, ooo 101, ooo 102), 1 duplicate ignored
+        assert (
+            res_b2.applied_count == 4
+        )  # 4 applied (del, late, ooo 101, ooo 102), 1 duplicate ignored
         assert res_b2.duplicate_count == 1
 
         # Step 7: Final Reconciliation Assertions

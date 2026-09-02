@@ -79,17 +79,20 @@ def test_merge_engine_insert_and_update(spark_session: SparkSession):
 
         # 1. Insert ACC-0041 (not in snapshot)
         ins_ev = _make_account_event("evt_ins_01", "INSERT", "ACC-0041", sequence_number=1)
-        engine.merge_wave("accounts", [ins_ev])
+        engine.merge_wave("accounts", [ins_ev], processing_id="proc_engine_test")
 
         df = store.read_current_table("accounts")
         assert df.count() == 41
         acc_41 = df.filter(df.account_id == "ACC-0041").first()
         assert acc_41["_last_sequence_number"] == 1
         assert acc_41["_last_operation"] == "INSERT"
+        assert acc_41["_last_processing_id"] == "proc_engine_test"
 
         # 2. Update ACC-0001 (already in snapshot)
-        upd_ev = _make_account_event("evt_upd_01", "UPDATE", "ACC-0001", status="SUSPENDED", sequence_number=2)
-        engine.merge_wave("accounts", [upd_ev])
+        upd_ev = _make_account_event(
+            "evt_upd_01", "UPDATE", "ACC-0001", status="SUSPENDED", sequence_number=2
+        )
+        engine.merge_wave("accounts", [upd_ev], processing_id="proc_engine_test")
 
         df_after = store.read_current_table("accounts")
         assert df_after.count() == 41
@@ -97,6 +100,7 @@ def test_merge_engine_insert_and_update(spark_session: SparkSession):
         assert acc_01["status"] == "SUSPENDED"
         assert acc_01["_last_sequence_number"] == 2
         assert acc_01["_last_operation"] == "UPDATE"
+        assert acc_01["_last_processing_id"] == "proc_engine_test"
 
 
 def test_merge_engine_hard_delete(spark_session: SparkSession):
@@ -109,7 +113,9 @@ def test_merge_engine_hard_delete(spark_session: SparkSession):
         engine = DeltaMergeEngine(spark=spark_session, target_store=store)
 
         del_ev = _make_account_event("evt_del_01", "DELETE", "ACC-0001", sequence_number=10)
-        engine.merge_wave("accounts", [del_ev], delete_policy=DeletePolicy.HARD)
+        engine.merge_wave(
+            "accounts", [del_ev], delete_policy=DeletePolicy.HARD, processing_id="proc_del_test"
+        )
 
         df = store.read_current_table("accounts")
         assert df.count() == 39
@@ -126,7 +132,9 @@ def test_merge_engine_soft_delete(spark_session: SparkSession):
         engine = DeltaMergeEngine(spark=spark_session, target_store=store)
 
         del_ev = _make_account_event("evt_del_01", "DELETE", "ACC-0001", sequence_number=10)
-        engine.merge_wave("accounts", [del_ev], delete_policy=DeletePolicy.SOFT)
+        engine.merge_wave(
+            "accounts", [del_ev], delete_policy=DeletePolicy.SOFT, processing_id="proc_soft_test"
+        )
 
         # Active current table filters out deleted rows -> 39
         active_df = store.read_current_table("accounts", include_deleted=False)
@@ -139,6 +147,7 @@ def test_merge_engine_soft_delete(spark_session: SparkSession):
         assert del_row["_is_deleted"] is True
         assert del_row["_deleted_at"] == "2026-05-11T01:00:01Z"
         assert del_row["_last_operation"] == "DELETE"
+        assert del_row["_last_processing_id"] == "proc_soft_test"
 
 
 def test_merge_engine_soft_delete_cleared_by_subsequent_update(spark_session: SparkSession):
@@ -152,11 +161,17 @@ def test_merge_engine_soft_delete_cleared_by_subsequent_update(spark_session: Sp
 
         # 1. Soft delete
         del_ev = _make_account_event("evt_del_01", "DELETE", "ACC-0001", sequence_number=10)
-        engine.merge_wave("accounts", [del_ev], delete_policy=DeletePolicy.SOFT)
+        engine.merge_wave(
+            "accounts", [del_ev], delete_policy=DeletePolicy.SOFT, processing_id="proc_step1"
+        )
 
         # 2. Subsequent Update
-        upd_ev = _make_account_event("evt_upd_01", "UPDATE", "ACC-0001", status="ACTIVE", sequence_number=20)
-        engine.merge_wave("accounts", [upd_ev], delete_policy=DeletePolicy.SOFT)
+        upd_ev = _make_account_event(
+            "evt_upd_01", "UPDATE", "ACC-0001", status="ACTIVE", sequence_number=20
+        )
+        engine.merge_wave(
+            "accounts", [upd_ev], delete_policy=DeletePolicy.SOFT, processing_id="proc_step2"
+        )
 
         active_df = store.read_current_table("accounts", include_deleted=False)
         assert active_df.count() == 40
@@ -164,6 +179,7 @@ def test_merge_engine_soft_delete_cleared_by_subsequent_update(spark_session: Sp
         assert acc_01["_is_deleted"] is False
         assert acc_01["_deleted_at"] is None
         assert acc_01["_last_sequence_number"] == 20
+        assert acc_01["_last_processing_id"] == "proc_step2"
 
 
 def test_merge_engine_ambiguity_protection_multiple_events_same_pk(spark_session: SparkSession):
@@ -175,8 +191,12 @@ def test_merge_engine_ambiguity_protection_multiple_events_same_pk(spark_session
 
         engine = DeltaMergeEngine(spark=spark_session, target_store=store)
 
-        ev1 = _make_account_event("evt_01", "UPDATE", "ACC-0001", status="ACTIVE", sequence_number=10)
-        ev2 = _make_account_event("evt_02", "UPDATE", "ACC-0001", status="SUSPENDED", sequence_number=10)
+        ev1 = _make_account_event(
+            "evt_01", "UPDATE", "ACC-0001", status="ACTIVE", sequence_number=10
+        )
+        ev2 = _make_account_event(
+            "evt_02", "UPDATE", "ACC-0001", status="SUSPENDED", sequence_number=10
+        )
 
         with pytest.raises(MergeAmbiguityError):
-            engine.merge_wave("accounts", [ev1, ev2])
+            engine.merge_wave("accounts", [ev1, ev2], processing_id="proc_ambig")

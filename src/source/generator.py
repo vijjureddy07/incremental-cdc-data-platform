@@ -120,7 +120,9 @@ class SourceGenerator:
             billing_cycle = BILLING_CYCLES[self.rng.randint(0, len(BILLING_CYCLES) - 1)]
             status = SUBSCRIPTION_STATUSES[self.rng.randint(0, len(SUBSCRIPTION_STATUSES) - 1)]
 
-            start_date_obj = (self.config.base_timestamp + timedelta(days=self.rng.randint(5, 75))).date()
+            start_date_obj = (
+                self.config.base_timestamp + timedelta(days=self.rng.randint(5, 75))
+            ).date()
             end_date_obj = start_date_obj + timedelta(days=365) if status == "CANCELLED" else None
 
             created_at = datetime.combine(start_date_obj, datetime.min.time(), tzinfo=UTC)

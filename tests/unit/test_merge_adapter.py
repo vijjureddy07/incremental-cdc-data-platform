@@ -5,9 +5,14 @@ import tempfile
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
 from pyspark.sql import SparkSession
 
-from src.merge.event_adapter import convert_events_to_spark_df, load_accepted_events_from_file
+from src.merge.event_adapter import (
+    convert_events_to_spark_df,
+    extract_processing_id_from_path,
+    load_accepted_events_from_file,
+)
 from src.normalization.models import NormalizedCDCEvent
 
 
@@ -53,6 +58,24 @@ def test_adapter_load_from_jsonl():
         assert len(events) == 1
         assert events[0].event_id == "evt_acc_01"
         assert events[0].table_name == "accounts"
+
+
+def test_adapter_load_from_nonexistent_file_raises():
+    """Verify loading from non-existent file raises FileNotFoundError."""
+    with pytest.raises(FileNotFoundError):
+        load_accepted_events_from_file("/nonexistent/path/processing_id=proc_123/accepted.jsonl")
+
+
+def test_extract_processing_id_from_path():
+    """Verify extracting processing_id from different directory layouts."""
+    p1 = Path("/data/normalized_cdc/processing_id=proc_real_999/accepted.jsonl")
+    assert extract_processing_id_from_path(p1) == "proc_real_999"
+
+    p2 = "/var/tmp/run/processing_id=proc_abc_456/accepted.jsonl"
+    assert extract_processing_id_from_path(p2) == "proc_abc_456"
+
+    p3 = Path("/data/unpartitioned/accepted.jsonl")
+    assert extract_processing_id_from_path(p3) is None
 
 
 def test_adapter_convert_to_spark_df_with_types(spark_session: SparkSession):

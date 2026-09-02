@@ -96,9 +96,13 @@ class DeltaTargetStore:
                     elif isinstance(field.dataType, DecimalType):
                         row_dict[field.name] = Decimal(str(val))
                     elif isinstance(field.dataType, DateType):
-                        row_dict[field.name] = parse_iso_date(str(val)) if isinstance(val, str) else val
+                        row_dict[field.name] = (
+                            parse_iso_date(str(val)) if isinstance(val, str) else val
+                        )
                     elif isinstance(field.dataType, TimestampType):
-                        row_dict[field.name] = parse_iso_timestamp(str(val)) if isinstance(val, str) else val
+                        row_dict[field.name] = (
+                            parse_iso_timestamp(str(val)) if isinstance(val, str) else val
+                        )
                     elif isinstance(field.dataType, StringType):
                         row_dict[field.name] = str(val)
                     else:
@@ -157,11 +161,7 @@ class DeltaTargetStore:
         if not self.table_exists(table_name):
             raise FileNotFoundError(f"Delta table not found at {path}")
 
-        return (
-            self.spark.read.format("delta")
-            .option("versionAsOf", version)
-            .load(str(path))
-        )
+        return self.spark.read.format("delta").option("versionAsOf", version).load(str(path))
 
     def get_delta_history(self, table_name: str) -> list[dict[str, Any]]:
         """Retrieve commit history for a Delta table."""

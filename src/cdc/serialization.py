@@ -47,8 +47,14 @@ def write_cdc_batch_jsonl(
     # Group events by batch_id and table_name
     grouped_events: dict[tuple[str, str], list[CDCEvent | dict[str, Any]]] = defaultdict(list)
     for event in events:
-        batch_id = event.batch_id if isinstance(event, CDCEvent) else event.get("batch_id", "batch_unknown")
-        table_name = event.table_name if isinstance(event, CDCEvent) else event.get("table_name", "unknown")
+        batch_id = (
+            event.batch_id
+            if isinstance(event, CDCEvent)
+            else event.get("batch_id", "batch_unknown")
+        )
+        table_name = (
+            event.table_name if isinstance(event, CDCEvent) else event.get("table_name", "unknown")
+        )
         grouped_events[(batch_id, table_name)].append(event)
 
     written_paths: dict[str, Path] = {}

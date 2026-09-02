@@ -49,7 +49,9 @@ class DeltaMergeEngine:
         pk = TABLE_PRIMARY_KEYS[table_name]
         table_path = self.target_store.get_table_path(table_name)
         if not self.target_store.table_exists(table_name):
-            raise FileNotFoundError(f"Target Delta table '{table_name}' does not exist at {table_path}")
+            raise FileNotFoundError(
+                f"Target Delta table '{table_name}' does not exist at {table_path}"
+            )
 
         # Ambiguity protection: verify no two events in this wave target the same primary key
         pks_seen: set[str] = set()
@@ -70,7 +72,9 @@ class DeltaMergeEngine:
 
         # 1. Apply Upserts (INSERT / UPDATE)
         if upsert_events:
-            upsert_df = convert_events_to_spark_df(table_name, upsert_events, self.spark, processing_id=processing_id)
+            upsert_df = convert_events_to_spark_df(
+                table_name, upsert_events, self.spark, processing_id=processing_id
+            )
 
             # Build update set expressions
             update_set = {col: f"source.{col}" for col in business_cols}
@@ -115,7 +119,9 @@ class DeltaMergeEngine:
 
         # 2. Apply Deletes (DELETE)
         if delete_events:
-            delete_df = convert_events_to_spark_df(table_name, delete_events, self.spark, processing_id=processing_id)
+            delete_df = convert_events_to_spark_df(
+                table_name, delete_events, self.spark, processing_id=processing_id
+            )
 
             if delete_policy == DeletePolicy.HARD:
                 (

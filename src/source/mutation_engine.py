@@ -116,10 +116,7 @@ class SourceMutationEngine:
         """
         result = MutationResult()
 
-        event_objs = [
-            ev if isinstance(ev, CDCEvent) else CDCEvent.from_dict(ev)
-            for ev in events
-        ]
+        event_objs = [ev if isinstance(ev, CDCEvent) else CDCEvent.from_dict(ev) for ev in events]
 
         if sort_by_sequence:
             # Sort authoritatively by table_name, business_key string, sequence_number

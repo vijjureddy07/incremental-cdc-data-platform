@@ -75,8 +75,8 @@ data/normalized_cdc/*
 data/quarantine/*
 !data/quarantine/*/
 !data/quarantine/**/.gitkeep
-data/delta/*
-!data/delta/*/
+data/delta/**
+!data/delta/**/
 !data/delta/**/.gitkeep
 
 # Local SQLite databases
@@ -84,7 +84,8 @@ data/delta/*
 *.sqlite
 *.sqlite3
 
-# Spark runtime & metastore
+# Spark runtime & metastore & Ivy
 spark-warehouse/
 metastore_db/
 derby.log
+.ivy2/

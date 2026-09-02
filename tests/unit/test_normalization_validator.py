@@ -282,7 +282,9 @@ def test_validator_update_before_payload_missing_primary_key():
     is_valid, q_code, q_reason = validate_raw_cdc_record(record)
     assert is_valid is False
     assert q_code == QuarantineReasonCode.BUSINESS_KEY_PAYLOAD_MISMATCH
-    assert "Before-payload is missing required primary key column 'subscription_id'" in str(q_reason)
+    assert "Before-payload is missing required primary key column 'subscription_id'" in str(
+        q_reason
+    )
 
 
 def test_validator_delete_before_payload_missing_primary_key():

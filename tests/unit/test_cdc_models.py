@@ -1,6 +1,5 @@
 """Unit tests for CDC event model contracts."""
 
-
 from src.cdc.models import CDCEvent, CDCOperation
 
 

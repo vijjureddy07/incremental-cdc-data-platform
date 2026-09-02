@@ -2,6 +2,7 @@
 
 import tempfile
 
+import pytest
 from pyspark.sql import SparkSession
 
 from src.merge.event_ledger import EventApplyLedger
@@ -51,18 +52,46 @@ def test_event_ledger_initialization_and_schema(spark_session: SparkSession):
 
 
 def test_event_ledger_record_pending_events(spark_session: SparkSession):
-    """Verify recording events in ledger assigns PENDING status."""
+    """Verify recording events in ledger assigns PENDING status and processing_id."""
     with tempfile.TemporaryDirectory() as tmpdir:
         ledger = EventApplyLedger(spark=spark_session, ledger_base_dir=tmpdir)
         ev1 = _make_sample_event("evt_001")
         ev2 = _make_sample_event("evt_002", sequence_number=11)
 
-        ledger.record_pending_events([ev1, ev2])
+        ledger.record_pending_events([ev1, ev2], processing_id="proc_set_A")
 
         pending = ledger.get_pending_records()
         assert len(pending) == 2
         assert {p.event_id for p in pending} == {"evt_001", "evt_002"}
         assert all(p.status == LedgerStatus.PENDING.value for p in pending)
+        assert all(p.processing_id == "proc_set_A" for p in pending)
+
+
+def test_event_ledger_pending_intent_immutability(spark_session: SparkSession):
+    """Verify that calling record_pending_events on an existing pending event leaves its provenance unchanged."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ledger = EventApplyLedger(spark=spark_session, ledger_base_dir=tmpdir)
+        ev1 = _make_sample_event("evt_001")
+
+        ledger.record_pending_events([ev1], processing_id="proc_original")
+        rec1 = ledger.get_ledger_record_by_event_id("evt_001")
+        assert rec1 is not None
+        assert rec1.processing_id == "proc_original"
+
+        # Attempt to record same event_id under a different processing_id
+        ledger.record_pending_events([ev1], processing_id="proc_intruder")
+        rec2 = ledger.get_ledger_record_by_event_id("evt_001")
+        assert rec2 is not None
+        assert rec2.processing_id == "proc_original"  # Immutable!
+
+
+def test_event_ledger_record_pending_requires_processing_id(spark_session: SparkSession):
+    """Verify record_pending_events rejects empty processing_id."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ledger = EventApplyLedger(spark=spark_session, ledger_base_dir=tmpdir)
+        ev1 = _make_sample_event("evt_001")
+        with pytest.raises(ValueError):
+            ledger.record_pending_events([ev1], processing_id="")
 
 
 def test_event_ledger_mark_applied(spark_session: SparkSession):
@@ -72,7 +101,7 @@ def test_event_ledger_mark_applied(spark_session: SparkSession):
         ev1 = _make_sample_event("evt_001")
         ev2 = _make_sample_event("evt_002", sequence_number=11)
 
-        ledger.record_pending_events([ev1, ev2])
+        ledger.record_pending_events([ev1, ev2], processing_id="proc_test")
         ledger.mark_events_applied(["evt_001"])
 
         all_recs = ledger.get_all_ledger_records()
@@ -92,9 +121,11 @@ def test_event_ledger_get_applied_max_sequences(spark_session: SparkSession):
         ledger = EventApplyLedger(spark=spark_session, ledger_base_dir=tmpdir)
         ev1 = _make_sample_event("evt_001", sequence_number=10)
         ev2 = _make_sample_event("evt_002", sequence_number=20)
-        ev3 = _make_sample_event("evt_003", entity_key='accounts:{"account_id":"ACC-0002"}', sequence_number=5)
+        ev3 = _make_sample_event(
+            "evt_003", entity_key='accounts:{"account_id":"ACC-0002"}', sequence_number=5
+        )
 
-        ledger.record_pending_events([ev1, ev2, ev3])
+        ledger.record_pending_events([ev1, ev2, ev3], processing_id="proc_test")
         # Mark ev1 and ev2 applied
         ledger.mark_events_applied(["evt_001", "evt_002"])
 

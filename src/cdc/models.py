@@ -60,7 +60,9 @@ class CDCEvent:
             "source_commit_timestamp": self.source_commit_timestamp,
             "batch_id": self.batch_id,
             "payload": dict(self.payload) if self.payload is not None else None,
-            "before_payload": dict(self.before_payload) if self.before_payload is not None else None,
+            "before_payload": dict(self.before_payload)
+            if self.before_payload is not None
+            else None,
             "source_system": self.source_system,
         }
 
@@ -77,6 +79,8 @@ class CDCEvent:
             source_commit_timestamp=str(data.get("source_commit_timestamp", "")),
             batch_id=str(data.get("batch_id", "")),
             payload=dict(data["payload"]) if data.get("payload") is not None else None,
-            before_payload=dict(data["before_payload"]) if data.get("before_payload") is not None else None,
+            before_payload=dict(data["before_payload"])
+            if data.get("before_payload") is not None
+            else None,
             source_system=str(data.get("source_system", "b2b_saas_postgres")),
         )

@@ -52,7 +52,9 @@ def test_normalization_pipeline_batch_1_clean_ingestion(spark_session: SparkSess
         quarantine_dir = base_dir / "quarantine"
 
         cdc_gen = CDCScenarioGenerator(SourceGenerator(SnapshotConfig(seed=42)))
-        batch_1_events = [e.to_dict() for e in cdc_gen.generate_batch_1_inserts_and_updates("batch_001")]
+        batch_1_events = [
+            e.to_dict() for e in cdc_gen.generate_batch_1_inserts_and_updates("batch_001")
+        ]
 
         files = write_cdc_events_to_landing_dir(batch_1_events, landing_dir, "batch_001")
 
@@ -87,8 +89,12 @@ def test_normalization_pipeline_batch_2_advanced_scenarios(spark_session: SparkS
         quarantine_dir = base_dir / "quarantine"
 
         cdc_gen = CDCScenarioGenerator(SourceGenerator(SnapshotConfig(seed=42)))
-        batch_1_events = [e.to_dict() for e in cdc_gen.generate_batch_1_inserts_and_updates("batch_001")]
-        batch_2_events = [e.to_dict() for e in cdc_gen.generate_batch_2_advanced_cdc_scenarios("batch_002")]
+        batch_1_events = [
+            e.to_dict() for e in cdc_gen.generate_batch_1_inserts_and_updates("batch_001")
+        ]
+        batch_2_events = [
+            e.to_dict() for e in cdc_gen.generate_batch_2_advanced_cdc_scenarios("batch_002")
+        ]
 
         files_b1 = write_cdc_events_to_landing_dir(batch_1_events, landing_dir, "batch_001")
         files_b2 = write_cdc_events_to_landing_dir(batch_2_events, landing_dir, "batch_002")
@@ -110,7 +116,9 @@ def test_normalization_pipeline_batch_2_advanced_scenarios(spark_session: SparkS
         assert metrics.status == "SUCCESS"
 
         # Verify out-of-order events for ACC-0002 are sorted strictly into sequence order: 101 then 102
-        acc_events = [e for e in accepted if e.entity_sequence_key == 'accounts:{"account_id":"ACC-0002"}']
+        acc_events = [
+            e for e in accepted if e.entity_sequence_key == 'accounts:{"account_id":"ACC-0002"}'
+        ]
         assert len(acc_events) == 2
         assert acc_events[0].sequence_number == 101
         assert acc_events[1].sequence_number == 102
@@ -203,7 +211,9 @@ def test_normalization_pipeline_combined_lifecycle_reconciliation(spark_session:
 
         # Strict invariant reconciliation
         assert metrics.raw_records_seen == (
-            metrics.accepted_records + metrics.exact_duplicates_dropped + metrics.quarantined_records
+            metrics.accepted_records
+            + metrics.exact_duplicates_dropped
+            + metrics.quarantined_records
         )
 
 
@@ -216,7 +226,9 @@ def test_normalization_pipeline_replay_determinism(spark_session: SparkSession):
         quarantine_dir = base_dir / "quarantine"
 
         cdc_gen = CDCScenarioGenerator(SourceGenerator(SnapshotConfig(seed=42)))
-        batch_1_events = [e.to_dict() for e in cdc_gen.generate_batch_1_inserts_and_updates("batch_001")]
+        batch_1_events = [
+            e.to_dict() for e in cdc_gen.generate_batch_1_inserts_and_updates("batch_001")
+        ]
         files = write_cdc_events_to_landing_dir(batch_1_events, landing_dir, "batch_001")
 
         pipeline = CDCNormalizationPipeline(
@@ -246,7 +258,9 @@ def test_normalization_pipeline_deterministic_output_ordering(spark_session: Spa
         quarantine_dir = base_dir / "quarantine"
 
         cdc_gen = CDCScenarioGenerator(SourceGenerator(SnapshotConfig(seed=42)))
-        batch_1_events = [e.to_dict() for e in cdc_gen.generate_batch_1_inserts_and_updates("batch_001")]
+        batch_1_events = [
+            e.to_dict() for e in cdc_gen.generate_batch_1_inserts_and_updates("batch_001")
+        ]
         files = write_cdc_events_to_landing_dir(batch_1_events, landing_dir, "batch_001")
 
         pipeline = CDCNormalizationPipeline(
@@ -269,7 +283,9 @@ def test_normalization_pipeline_reversed_input_replay(spark_session: SparkSessio
         base1 = Path(tmpdir1)
         cdc_gen = CDCScenarioGenerator(SourceGenerator(SnapshotConfig(seed=42)))
         b1_events = [e.to_dict() for e in cdc_gen.generate_batch_1_inserts_and_updates("batch_001")]
-        b2_events = [e.to_dict() for e in cdc_gen.generate_batch_2_advanced_cdc_scenarios("batch_002")]
+        b2_events = [
+            e.to_dict() for e in cdc_gen.generate_batch_2_advanced_cdc_scenarios("batch_002")
+        ]
 
         files1_b1 = write_cdc_events_to_landing_dir(b1_events, base1 / "cdc_landing", "batch_001")
         files1_b2 = write_cdc_events_to_landing_dir(b2_events, base1 / "cdc_landing", "batch_002")
@@ -302,7 +318,9 @@ def test_normalization_pipeline_reversed_input_replay(spark_session: SparkSessio
         assert [e.to_dict() for e in acc1] == [e.to_dict() for e in acc2]
 
 
-def test_normalization_pipeline_reversed_duplicate_conflict_quarantine_order(spark_session: SparkSession):
+def test_normalization_pipeline_reversed_duplicate_conflict_quarantine_order(
+    spark_session: SparkSession,
+):
     """Verify conflicting duplicate events produce identical quarantine ordering regardless of file/input order."""
     with tempfile.TemporaryDirectory() as tmpdir1, tempfile.TemporaryDirectory() as tmpdir2:
         # Create 2 conflicting events with same event_id but different payloads
@@ -332,7 +350,11 @@ def test_normalization_pipeline_reversed_duplicate_conflict_quarantine_order(spa
         f1_b.parent.mkdir(parents=True)
         f1_b.write_text(json.dumps(ev_conf_b) + "\n", encoding="utf-8")
 
-        p1 = CDCNormalizationPipeline(spark=spark_session, normalized_base_dir=base1 / "norm", quarantine_base_dir=base1 / "quar")
+        p1 = CDCNormalizationPipeline(
+            spark=spark_session,
+            normalized_base_dir=base1 / "norm",
+            quarantine_base_dir=base1 / "quar",
+        )
         _, q1, _ = p1.run_pipeline([f1_a, f1_b])
 
         # Env 2: B then A (reversed input order)
@@ -344,7 +366,11 @@ def test_normalization_pipeline_reversed_duplicate_conflict_quarantine_order(spa
         f2_b.parent.mkdir(parents=True)
         f2_b.write_text(json.dumps(ev_conf_b) + "\n", encoding="utf-8")
 
-        p2 = CDCNormalizationPipeline(spark=spark_session, normalized_base_dir=base2 / "norm", quarantine_base_dir=base2 / "quar")
+        p2 = CDCNormalizationPipeline(
+            spark=spark_session,
+            normalized_base_dir=base2 / "norm",
+            quarantine_base_dir=base2 / "quar",
+        )
         _, q2, _ = p2.run_pipeline([f2_b, f2_a])
 
         assert len(q1) == 2

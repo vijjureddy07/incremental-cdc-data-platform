@@ -289,7 +289,7 @@ pip install -r requirements-dev.txt
 pip install -e .
 ```
 
-### Run Full Test Suite (146 tests)
+### Run Full Test Suite (156 tests)
 
 ```bash
 pytest -v
@@ -317,9 +317,10 @@ python -m build --wheel
   - Durable SQLite control tables, explicit SQL transactions, composite cursors `(updated_at, PK)`, bounded window extraction, durable recoverable window contract, optimistic concurrency versioning, failure recovery, physical delete blind-spot testing.
 - [x] **Module 3: CDC Normalization, Ordering, Dedupe & Quarantine** *(FROZEN / COMPLETE)*
   - Raw JSONL ingestion, structural & semantic validation, PySpark window-based deduplication, duplicate-event conflict quarantine, authoritative entity sequence ordering, dead-letter quarantine store, replay determinism.
-- [x] **Module 4: Delta MERGE, Delete Propagation, Idempotent Replay & Recovery** *(COMPLETED / VALIDATED)*
+- [x] **Module 4: Delta MERGE, Delete Propagation, Idempotent Replay & Recovery** *(FROZEN / COMPLETE)*
   - Delta Lake current-state tables, two-phase applied event ledger, ACID Delta MERGE, hard/soft delete propagation, stale resurrection protection, crash recovery, exact replay idempotency, full mutation oracle reconciliation.
 - [ ] **Module 5: Databricks Lakeflow AUTO CDC**
   - Modern Lakeflow Declarative Pipeline definitions with native AUTO CDC constructs.
 - [ ] **Module 6: Delta Change Data Feed, CI/CD & Final Hardening**
   - Downstream Gold layer consumption via Delta Change Data Feed (CDF), end-to-end reconciliation tests, automated quality gates.
+

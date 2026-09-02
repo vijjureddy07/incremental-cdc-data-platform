@@ -137,7 +137,11 @@ def test_processing_id_root_directory_independence():
 
         assert proc_id1 == proc_id2
         assert manifest1 == manifest2
-        assert manifest1 == ["batch_id=batch_001/accounts.jsonl:" + f1.read_text().strip().encode().hex()[:0] + manifest1[0].split(":")[1]]
+        assert manifest1 == [
+            "batch_id=batch_001/accounts.jsonl:"
+            + f1.read_text().strip().encode().hex()[:0]
+            + manifest1[0].split(":")[1]
+        ]
 
 
 def test_processing_id_content_change_sensitivity():

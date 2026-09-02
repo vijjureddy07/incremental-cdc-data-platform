@@ -117,11 +117,20 @@ class EventApplyLedger:
     def record_pending_events(
         self,
         events: list[NormalizedCDCEvent],
-        processing_id: str = "proc_delta",
+        processing_id: str,
     ) -> None:
-        """Record a batch of incoming events into the ledger with PENDING status."""
+        """Record a batch of incoming events into the ledger with PENDING status.
+
+        Invariant: PENDING intent is immutable. If an event_id already exists in the ledger,
+        its existing row is left untouched (whenNotMatchedInsertAll only).
+        """
         if not events:
             return
+
+        if not processing_id or not isinstance(processing_id, str):
+            raise ValueError(
+                "A non-empty processing_id string is required to record pending events."
+            )
 
         if not self.ledger_exists():
             self.initialize_ledger()
@@ -152,21 +161,6 @@ class EventApplyLedger:
                 source_df.alias("source"),
                 "target.event_id = source.event_id",
             )
-            .whenMatchedUpdate(
-                condition="target.status != 'APPLIED'",
-                set={
-                    "event_fingerprint": "source.event_fingerprint",
-                    "entity_sequence_key": "source.entity_sequence_key",
-                    "table_name": "source.table_name",
-                    "business_key_canonical": "source.business_key_canonical",
-                    "sequence_number": "source.sequence_number",
-                    "operation": "source.operation",
-                    "source_commit_timestamp": "source.source_commit_timestamp",
-                    "processing_id": "source.processing_id",
-                    "source_file": "source.source_file",
-                    "status": "source.status",
-                },
-            )
             .whenNotMatchedInsertAll()
             .execute()
         )
@@ -181,6 +175,7 @@ class EventApplyLedger:
 
         delta_table = DeltaTable.forPath(self.spark, str(self.ledger_dir))
         delta_table.update(
-            condition=F.col("event_id").isin(event_ids),
+            condition=F.col("event_id").isin(event_ids)
+            & (F.col("status") == F.lit(LedgerStatus.PENDING.value)),
             set={"status": F.lit(LedgerStatus.APPLIED.value)},
         )

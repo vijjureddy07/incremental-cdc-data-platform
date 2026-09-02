@@ -26,7 +26,11 @@ class ValidationResult:
 class CDCValidator:
     """Validates CDC change events against the canonical contract."""
 
-    ALLOWED_OPERATIONS = {CDCOperation.INSERT.value, CDCOperation.UPDATE.value, CDCOperation.DELETE.value}
+    ALLOWED_OPERATIONS = {
+        CDCOperation.INSERT.value,
+        CDCOperation.UPDATE.value,
+        CDCOperation.DELETE.value,
+    }
     ALLOWED_TABLES = set(TABLE_SCHEMAS_MAP.keys())
 
     @classmethod
@@ -85,8 +89,15 @@ class CDCValidator:
 
         # 5. sequence_number validation
         seq_num = data.get("sequence_number")
-        if seq_num is None or not isinstance(seq_num, int) or isinstance(seq_num, bool) or seq_num <= 0:
-            result.add_error(f"Invalid 'sequence_number': {seq_num}. Must be a strictly positive integer (> 0)")
+        if (
+            seq_num is None
+            or not isinstance(seq_num, int)
+            or isinstance(seq_num, bool)
+            or seq_num <= 0
+        ):
+            result.add_error(
+                f"Invalid 'sequence_number': {seq_num}. Must be a strictly positive integer (> 0)"
+            )
 
         # 6. timestamps validation
         event_ts = data.get("event_timestamp")
@@ -129,13 +140,25 @@ class CDCValidator:
         elif operation == CDCOperation.UPDATE.value:
             if payload is None or not isinstance(payload, dict) or len(payload) == 0:
                 result.add_error("UPDATE operation must have a non-empty 'payload' (after-image)")
-            if before_payload is None or not isinstance(before_payload, dict) or len(before_payload) == 0:
-                result.add_error("UPDATE operation must have a non-empty 'before_payload' (before-image)")
+            if (
+                before_payload is None
+                or not isinstance(before_payload, dict)
+                or len(before_payload) == 0
+            ):
+                result.add_error(
+                    "UPDATE operation must have a non-empty 'before_payload' (before-image)"
+                )
 
         elif operation == CDCOperation.DELETE.value:
             if payload is not None:
                 result.add_error("DELETE operation must have null 'payload'")
-            if before_payload is None or not isinstance(before_payload, dict) or len(before_payload) == 0:
-                result.add_error("DELETE operation must have a non-empty 'before_payload' (before-image)")
+            if (
+                before_payload is None
+                or not isinstance(before_payload, dict)
+                or len(before_payload) == 0
+            ):
+                result.add_error(
+                    "DELETE operation must have a non-empty 'before_payload' (before-image)"
+                )
 
         return result

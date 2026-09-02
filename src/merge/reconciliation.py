@@ -33,9 +33,7 @@ def reconcile_delta_against_mutation_oracle(
     for table_name in TABLE_SCHEMAS_MAP:
         pk = TABLE_PRIMARY_KEYS[table_name]
         oracle_records = oracle_state.get(table_name, [])
-        oracle_by_pk: dict[str, dict[str, Any]] = {
-            str(r[pk]): dict(r) for r in oracle_records
-        }
+        oracle_by_pk: dict[str, dict[str, Any]] = {str(r[pk]): dict(r) for r in oracle_records}
 
         # Read Delta table excluding CDC operational metadata columns
         delta_df = target_store.read_current_table(
@@ -79,12 +77,14 @@ def reconcile_delta_against_mutation_oracle(
         # Check all keys present in oracle
         for pk_val, oracle_row in oracle_by_pk.items():
             if pk_val not in delta_by_pk:
-                table_mismatches.append({
-                    "primary_key": pk_val,
-                    "error": "Missing in Delta target",
-                    "oracle": oracle_row,
-                    "delta": None,
-                })
+                table_mismatches.append(
+                    {
+                        "primary_key": pk_val,
+                        "error": "Missing in Delta target",
+                        "oracle": oracle_row,
+                        "delta": None,
+                    }
+                )
             else:
                 delta_row = delta_by_pk[pk_val]
                 # Compare each field
@@ -94,21 +94,25 @@ def reconcile_delta_against_mutation_oracle(
                     if str(o_val) != str(d_val):
                         diffs[col] = {"oracle": o_val, "delta": d_val}
                 if diffs:
-                    table_mismatches.append({
-                        "primary_key": pk_val,
-                        "error": "Column value mismatch",
-                        "diffs": diffs,
-                    })
+                    table_mismatches.append(
+                        {
+                            "primary_key": pk_val,
+                            "error": "Column value mismatch",
+                            "diffs": diffs,
+                        }
+                    )
 
         # Check for unexpected rows in Delta
         for pk_val in delta_by_pk:
             if pk_val not in oracle_by_pk:
-                table_mismatches.append({
-                    "primary_key": pk_val,
-                    "error": "Unexpected row in Delta target (not in oracle)",
-                    "oracle": None,
-                    "delta": delta_by_pk[pk_val],
-                })
+                table_mismatches.append(
+                    {
+                        "primary_key": pk_val,
+                        "error": "Unexpected row in Delta target (not in oracle)",
+                        "oracle": None,
+                        "delta": delta_by_pk[pk_val],
+                    }
+                )
 
         if table_mismatches or len(delta_by_pk) != len(oracle_by_pk):
             report["is_reconciled"] = False

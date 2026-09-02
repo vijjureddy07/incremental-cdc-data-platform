@@ -16,7 +16,10 @@ from src.source.mutation_engine import SourceMutationEngine
 
 def _ensure_java_home() -> None:
     """Ensure JAVA_HOME is configured to a valid JVM runtime on macOS / Linux."""
-    if "JAVA_HOME" not in os.environ or not (Path(os.environ["JAVA_HOME"]) / "bin" / "java").exists():
+    if (
+        "JAVA_HOME" not in os.environ
+        or not (Path(os.environ["JAVA_HOME"]) / "bin" / "java").exists()
+    ):
         candidate_paths = [
             Path("/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"),
             Path("/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home"),
@@ -45,7 +48,9 @@ def spark_session() -> Generator[SparkSession, None, None]:
             .config("spark.sql.warehouse.dir", wh_dir)
             .config("spark.sql.session.timeZone", "UTC")
             .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
-            .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+            .config(
+                "spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog"
+            )
         )
         spark = delta.configure_spark_with_delta_pip(builder).getOrCreate()
         spark.sparkContext.setLogLevel("ERROR")

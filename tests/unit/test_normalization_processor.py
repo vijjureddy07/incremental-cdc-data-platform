@@ -33,7 +33,9 @@ def test_processor_exact_duplicate_deduplication(spark_session: SparkSession):
     event2["ingestion_batch_id"] = "batch_002"
     event2["source_file"] = "batch_id=batch_002/accounts.jsonl"
 
-    accepted, quarantined, exact_dups_dropped, dup_conflicts, seq_conflicts = processor.process([event1, event2])
+    accepted, quarantined, exact_dups_dropped, dup_conflicts, seq_conflicts = processor.process(
+        [event1, event2]
+    )
 
     assert len(accepted) == 1
     assert len(quarantined) == 0
@@ -45,7 +47,9 @@ def test_processor_exact_duplicate_deduplication(spark_session: SparkSession):
     assert accepted[0].batch_id == "batch_001"
 
 
-def test_processor_exact_duplicate_winner_selection_stable_across_order(spark_session: SparkSession):
+def test_processor_exact_duplicate_winner_selection_stable_across_order(
+    spark_session: SparkSession,
+):
     """Verify exact duplicate winner is chosen by deterministic provenance ordering regardless of input list order."""
     processor = SparkCDCNormalizationProcessor(spark_session)
 
@@ -108,13 +112,17 @@ def test_processor_conflicting_duplicate_event_id_quarantine(spark_session: Spar
     event2["payload"] = {"account_id": "ACC-0001", "status": "TRIAL"}
     event2["ingestion_order"] = 2
 
-    accepted, quarantined, exact_dups_dropped, dup_conflicts, seq_conflicts = processor.process([event1, event2])
+    accepted, quarantined, exact_dups_dropped, dup_conflicts, seq_conflicts = processor.process(
+        [event1, event2]
+    )
 
     assert len(accepted) == 0
     assert len(quarantined) == 2
     assert exact_dups_dropped == 0
     assert dup_conflicts == 2
-    assert all(q.quarantine_code == QuarantineReasonCode.DUPLICATE_EVENT_CONFLICT for q in quarantined)
+    assert all(
+        q.quarantine_code == QuarantineReasonCode.DUPLICATE_EVENT_CONFLICT for q in quarantined
+    )
 
 
 def test_processor_out_of_order_sequence_normalization(spark_session: SparkSession):
@@ -158,7 +166,9 @@ def test_processor_out_of_order_sequence_normalization(spark_session: SparkSessi
     }
 
     # Ingestion order is 102 then 101
-    accepted, quarantined, exact_dups_dropped, dup_conflicts, seq_conflicts = processor.process([ev_102, ev_101])
+    accepted, quarantined, exact_dups_dropped, dup_conflicts, seq_conflicts = processor.process(
+        [ev_102, ev_101]
+    )
 
     assert len(accepted) == 2
     assert len(quarantined) == 0
@@ -210,7 +220,9 @@ def test_processor_equal_sequence_conflict_quarantine(spark_session: SparkSessio
         "ingestion_order": 2,
     }
 
-    accepted, quarantined, exact_dups_dropped, dup_conflicts, seq_conflicts = processor.process([ev_a, ev_b])
+    accepted, quarantined, exact_dups_dropped, dup_conflicts, seq_conflicts = processor.process(
+        [ev_a, ev_b]
+    )
 
     assert len(accepted) == 0
     assert len(quarantined) == 2
@@ -258,7 +270,9 @@ def test_processor_cross_entity_same_sequence_allowed(spark_session: SparkSessio
         "ingestion_order": 2,
     }
 
-    accepted, quarantined, exact_dups_dropped, dup_conflicts, seq_conflicts = processor.process([ev_acc1, ev_acc2])
+    accepted, quarantined, exact_dups_dropped, dup_conflicts, seq_conflicts = processor.process(
+        [ev_acc1, ev_acc2]
+    )
 
     assert len(accepted) == 2
     assert len(quarantined) == 0

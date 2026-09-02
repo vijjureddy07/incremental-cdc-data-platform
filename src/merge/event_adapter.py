@@ -21,12 +21,15 @@ from src.source.schemas import TABLE_SCHEMAS_MAP
 from src.utils.helpers import parse_iso_date, parse_iso_timestamp
 
 
-def extract_processing_id_from_path(path: Path) -> str:
-    """Extract processing_id from directory path or parent directory name."""
+def extract_processing_id_from_path(path: str | Path) -> str | None:
+    """Extract processing_id from directory path (e.g. .../processing_id=proc_123/accepted.jsonl)."""
     match = re.search(r"processing_id=([^/\\]+)", str(path))
     if match:
         return match.group(1)
-    return path.parent.name or "proc_unknown"
+    p = Path(path)
+    if p.parent.name.startswith("processing_id="):
+        return p.parent.name.split("=", 1)[1]
+    return None
 
 
 def load_accepted_events_from_file(
@@ -39,10 +42,13 @@ def load_accepted_events_from_file(
 
     Returns:
         List of NormalizedCDCEvent instances.
+
+    Raises:
+        FileNotFoundError: If the file does not exist.
     """
     path = Path(file_path)
     if not path.exists():
-        return []
+        raise FileNotFoundError(f"Accepted events file not found at: {path}")
 
     events: list[NormalizedCDCEvent] = []
 
@@ -61,7 +67,7 @@ def convert_events_to_spark_df(
     table_name: str,
     events: list[NormalizedCDCEvent],
     spark: SparkSession,
-    processing_id: str = "proc_delta",
+    processing_id: str,
 ) -> DataFrame:
     """Convert a list of accepted NormalizedCDCEvents for a table into a typed Spark DataFrame."""
     if table_name not in TABLE_SCHEMAS_MAP:
@@ -91,7 +97,9 @@ def convert_events_to_spark_df(
             elif isinstance(field.dataType, DateType):
                 row_dict[field.name] = parse_iso_date(str(val)) if isinstance(val, str) else val
             elif isinstance(field.dataType, TimestampType):
-                row_dict[field.name] = parse_iso_timestamp(str(val)) if isinstance(val, str) else val
+                row_dict[field.name] = (
+                    parse_iso_timestamp(str(val)) if isinstance(val, str) else val
+                )
             elif isinstance(field.dataType, StringType):
                 row_dict[field.name] = str(val)
             else:

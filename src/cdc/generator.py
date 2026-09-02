@@ -525,5 +525,7 @@ class CDCScenarioGenerator:
         return {
             "batch_001": self.generate_batch_1_inserts_and_updates("batch_001"),
             "batch_002": self.generate_batch_2_advanced_cdc_scenarios("batch_002"),
-            "batch_003_quarantine": self.generate_batch_3_quarantine_fixtures("batch_003_quarantine"),
+            "batch_003_quarantine": self.generate_batch_3_quarantine_fixtures(
+                "batch_003_quarantine"
+            ),
         }

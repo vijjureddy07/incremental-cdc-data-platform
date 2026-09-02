@@ -120,11 +120,7 @@ class CDCNormalizationPipeline:
 
         # Step 6: Compile audit metrics
         tables_seen = sorted(
-            {
-                str(r.get("table_name"))
-                for r in parsed_records
-                if r.get("table_name")
-            }
+            {str(r.get("table_name")) for r in parsed_records if r.get("table_name")}
         )
 
         min_seq_by_table: dict[str, int] = {}

@@ -66,7 +66,9 @@ class NormalizedCDCEvent:
             "batch_id": self.batch_id,
             "source_system": self.source_system,
             "payload": dict(self.payload) if self.payload is not None else None,
-            "before_payload": dict(self.before_payload) if self.before_payload is not None else None,
+            "before_payload": dict(self.before_payload)
+            if self.before_payload is not None
+            else None,
             "event_fingerprint": self.event_fingerprint,
             "ingestion_batch_id": self.ingestion_batch_id,
             "source_file": self.source_file,
@@ -89,7 +91,9 @@ class NormalizedCDCEvent:
             batch_id=str(data["batch_id"]),
             source_system=str(data["source_system"]),
             payload=dict(data["payload"]) if data.get("payload") is not None else None,
-            before_payload=dict(data["before_payload"]) if data.get("before_payload") is not None else None,
+            before_payload=dict(data["before_payload"])
+            if data.get("before_payload") is not None
+            else None,
             event_fingerprint=str(data["event_fingerprint"]),
             ingestion_batch_id=str(data.get("ingestion_batch_id", "")),
             source_file=str(data.get("source_file", "")),

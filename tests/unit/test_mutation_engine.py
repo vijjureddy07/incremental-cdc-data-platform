@@ -94,7 +94,9 @@ def test_mutation_engine_delete(mutation_engine: SourceMutationEngine):
     assert mutation_engine.get_record("payments", "PAY-0002") is None
 
 
-def test_mutation_engine_out_of_order_sequence_resolution_sorted(mutation_engine: SourceMutationEngine):
+def test_mutation_engine_out_of_order_sequence_resolution_sorted(
+    mutation_engine: SourceMutationEngine,
+):
     """Verify that applying out-of-order events with sort_by_sequence=True converges to highest sequence."""
     ev_102 = CDCEvent(
         event_id="evt_ooo_102",
@@ -149,7 +151,9 @@ def test_mutation_engine_out_of_order_sequence_resolution_sorted(mutation_engine
     assert rec["status"] == "ACTIVE"
 
 
-def test_mutation_engine_real_out_of_order_arrival_without_presort(mutation_engine: SourceMutationEngine):
+def test_mutation_engine_real_out_of_order_arrival_without_presort(
+    mutation_engine: SourceMutationEngine,
+):
     """Verify real out-of-order delivery (102 arriving before 101) with sort_by_sequence=False."""
     ev_102 = CDCEvent(
         event_id="evt_real_ooo_102",
@@ -207,7 +211,9 @@ def test_mutation_engine_real_out_of_order_arrival_without_presort(mutation_engi
     assert rec["status"] == "ACTIVE"
 
 
-def test_mutation_engine_strict_monotonicity_equal_sequence_rejection(mutation_engine: SourceMutationEngine):
+def test_mutation_engine_strict_monotonicity_equal_sequence_rejection(
+    mutation_engine: SourceMutationEngine,
+):
     """Verify that a different event_id with equal sequence_number (seq 50 then seq 50) is rejected."""
     ev_50_a = CDCEvent(
         event_id="evt_seq50_first",
@@ -297,7 +303,9 @@ def test_mutation_engine_idempotent_duplicate_rejection(mutation_engine: SourceM
     assert not app2
 
 
-def test_mutation_engine_snapshot_state_returns_actual_deep_copy(mutation_engine: SourceMutationEngine):
+def test_mutation_engine_snapshot_state_returns_actual_deep_copy(
+    mutation_engine: SourceMutationEngine,
+):
     """Verify get_snapshot_state returns a true deep copy so caller mutations do not leak."""
     initial_rec = mutation_engine.get_record("accounts", "ACC-0001")
     assert initial_rec is not None
