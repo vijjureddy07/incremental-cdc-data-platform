@@ -75,6 +75,9 @@ data/normalized_cdc/*
 data/quarantine/*
 !data/quarantine/*/
 !data/quarantine/**/.gitkeep
+data/delta/*
+!data/delta/*/
+!data/delta/**/.gitkeep
 
 # Local SQLite databases
 *.db

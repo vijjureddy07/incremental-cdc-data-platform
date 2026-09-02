@@ -1,9 +1,11 @@
-"""Pytest shared fixtures for Module 1, 2, and 3 test suites."""
+"""Pytest shared fixtures for Module 1, 2, 3, and 4 test suites."""
 
 import os
+import tempfile
 from collections.abc import Generator
 from pathlib import Path
 
+import delta
 import pytest
 from pyspark.sql import SparkSession
 
@@ -31,19 +33,24 @@ def _ensure_java_home() -> None:
 
 @pytest.fixture(scope="session")
 def spark_session() -> Generator[SparkSession, None, None]:
-    """Fixture providing a session-scoped PySpark local test session."""
+    """Fixture providing a session-scoped PySpark local test session with Delta Lake support."""
     _ensure_java_home()
-    spark = (
-        SparkSession.builder.master("local[2]")
-        .appName("CDC_Normalization_UnitTests")
-        .config("spark.ui.enabled", "false")
-        .config("spark.sql.shuffle.partitions", "2")
-        .config("spark.default.parallelism", "2")
-        .getOrCreate()
-    )
-    spark.sparkContext.setLogLevel("ERROR")
-    yield spark
-    spark.stop()
+    with tempfile.TemporaryDirectory() as wh_dir:
+        builder = (
+            SparkSession.builder.master("local[2]")
+            .appName("Incremental_CDC_Data_Platform_Tests")
+            .config("spark.ui.enabled", "false")
+            .config("spark.sql.shuffle.partitions", "2")
+            .config("spark.default.parallelism", "2")
+            .config("spark.sql.warehouse.dir", wh_dir)
+            .config("spark.sql.session.timeZone", "UTC")
+            .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
+            .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")
+        )
+        spark = delta.configure_spark_with_delta_pip(builder).getOrCreate()
+        spark.sparkContext.setLogLevel("ERROR")
+        yield spark
+        spark.stop()
 
 
 @pytest.fixture
