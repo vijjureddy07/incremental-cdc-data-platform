@@ -160,7 +160,30 @@ Module 4 applies canonical accepted CDC events into ACID-compliant Delta Lake cu
 
 ---
 
-## 6. Business Domain & Data Contracts
+## 6. Databricks Lakeflow AUTO CDC Architecture
+
+Module 5 provides the native, managed Databricks Lakeflow implementation using **Spark Declarative Pipelines**:
+
+1. **Declarative Streaming Tables & Flows**:
+   - Uses `from pyspark import pipelines as dp` with `dp.create_streaming_table(...)` and `dp.create_auto_cdc_flow(...)`.
+   - Replaces deprecated `import dlt` and legacy `apply_changes(...)`.
+2. **Initial Snapshot Hydration (`once = True`)**:
+   - Initial snapshot data is loaded once into the streaming tables using deterministic baseline sequence `sequence_number = 0`.
+3. **Continuous AUTO CDC & Authoritative Sequencing**:
+   - Evaluates ongoing change records ordered authoritatively by `sequence_number` (Long).
+   - Deletions applied via `apply_as_deletes = expr("operation = 'DELETE'")`.
+   - Excludes CDC control fields (`operation`, `sequence_number`) from final business target tables.
+4. **SCD Type 1 & SCD Type 2 Targets**:
+   - 4 Current-state SCD Type 1 targets: `accounts_current`, `subscriptions_current`, `invoices_current`, `payments_current`.
+   - 1 Historical audit SCD Type 2 target: `subscriptions_history`, tracking business modifications across all 7 subscription attributes with Lakeflow-managed `__START_AT` and `__END_AT` columns.
+5. **Managed Tombstones & GC Tuning**:
+   - Managed tombstones (`pipelines.cdc.tombstoneGCThresholdInSeconds = 604800`) prevent out-of-order delete resurrecting stale records.
+6. **SQL Reference Implementation**:
+   - [auto_cdc_reference.sql](file:///Users/vijjureddy/Job%20Switch%20Projects/Incremental%20&%20CDC%20Data%20Pipeline/databricks/lakeflow/sql/auto_cdc_reference.sql) provides equivalent declarative SQL using `CREATE FLOW ... AS AUTO CDC`.
+
+---
+
+## 7. Business Domain & Data Contracts
 
 The platform models a high-fidelity B2B SaaS subscription lifecycle:
 
@@ -185,7 +208,7 @@ The platform models a high-fidelity B2B SaaS subscription lifecycle:
 
 ---
 
-## 7. Repository Structure
+## 8. Repository Structure
 
 ```
 incremental-cdc-data-platform/
@@ -199,7 +222,16 @@ incremental-cdc-data-platform/
 │   ├── 02_WATERMARK_INCREMENTAL_INGESTION.md
 │   ├── 03_CDC_NORMALIZATION_ORDERING.md
 │   ├── 04_DELTA_MERGE_REPLAY_RECOVERY.md
+│   ├── 05_LAKEFLOW_AUTO_CDC.md
 │   └── PROGRESS.md
+├── databricks/
+│   └── lakeflow/
+│       ├── __init__.py          # Lakeflow module exports
+│       ├── config.py            # Externalized deployment configuration
+│       ├── contracts.py         # TableCDCSpec definitions
+│       ├── pipeline.py          # Declarative Python pipeline & AUTO CDC flows
+│       └── sql/
+│           └── auto_cdc_reference.sql # Declarative SQL reference implementation
 ├── src/
 │   ├── source/
 │   │   ├── schemas.py           # PySpark StructType & Dataclass contracts
@@ -256,7 +288,10 @@ incremental-cdc-data-platform/
 │   │   ├── test_merge_target_store.py
 │   │   ├── test_merge_event_ledger.py
 │   │   ├── test_merge_adapter.py
-│   │   └── test_merge_engine.py
+│   │   ├── test_merge_engine.py
+│   │   ├── test_lakeflow_contracts.py
+│   │   ├── test_lakeflow_pipeline.py
+│   │   └── test_lakeflow_projections.py
 │   └── integration/
 │       ├── test_end_to_end_simulator.py
 │       ├── test_watermark_pipeline.py
@@ -275,7 +310,7 @@ incremental-cdc-data-platform/
 
 ---
 
-## 8. Quickstart & Verification
+## 9. Quickstart & Verification
 
 ### Local Environment Setup
 
@@ -289,7 +324,7 @@ pip install -r requirements-dev.txt
 pip install -e .
 ```
 
-### Run Full Test Suite (156 tests)
+### Run Full Test Suite (173 tests)
 
 ```bash
 pytest -v
@@ -309,7 +344,7 @@ python -m build --wheel
 
 ---
 
-## 9. Project Roadmap (Modules 1–6)
+## 10. Project Roadmap (Modules 1–6)
 
 - [x] **Module 1: Source System + Deterministic CDC Event Simulator** *(FROZEN / COMPLETE)*
   - Synthetic B2B SaaS generator, Parquet initial snapshots, CDC event generator (Inserts, Updates, Deletes, Dups, Out-of-Order, Late, Quarantine), Structured Validator, In-memory Mutation Engine.
@@ -319,8 +354,9 @@ python -m build --wheel
   - Raw JSONL ingestion, structural & semantic validation, PySpark window-based deduplication, duplicate-event conflict quarantine, authoritative entity sequence ordering, dead-letter quarantine store, replay determinism.
 - [x] **Module 4: Delta MERGE, Delete Propagation, Idempotent Replay & Recovery** *(FROZEN / COMPLETE)*
   - Delta Lake current-state tables, two-phase applied event ledger, ACID Delta MERGE, hard/soft delete propagation, stale resurrection protection, crash recovery, exact replay idempotency, full mutation oracle reconciliation.
-- [ ] **Module 5: Databricks Lakeflow AUTO CDC**
-  - Modern Lakeflow Declarative Pipeline definitions with native AUTO CDC constructs.
+- [x] **Module 5: Databricks Lakeflow AUTO CDC** *(COMPLETE / CLOUD VALIDATION PENDING)*
+  - Modern Lakeflow Declarative Pipeline definitions with native AUTO CDC constructs (`create_auto_cdc_flow`), SCD Type 1 current-state streaming tables, SCD Type 2 history tracking, initial hydration with `once=True`, SQL reference.
 - [ ] **Module 6: Delta Change Data Feed, CI/CD & Final Hardening**
   - Downstream Gold layer consumption via Delta Change Data Feed (CDF), end-to-end reconciliation tests, automated quality gates.
+
 
