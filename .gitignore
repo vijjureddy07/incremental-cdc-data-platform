@@ -66,3 +66,11 @@ data/source_snapshot/*
 data/cdc_landing/*
 !data/cdc_landing/*/
 !data/cdc_landing/**/.gitkeep
+data/watermark_landing/*
+!data/watermark_landing/*/
+!data/watermark_landing/**/.gitkeep
+
+# Local SQLite databases
+*.db
+*.sqlite
+*.sqlite3

@@ -9,35 +9,41 @@ A production-grade, local-first engineering framework designed to demonstrate en
 Modern enterprise data platforms cannot afford full snapshot reloads for massive transactional tables. This repository provides a complete, robust reference implementation demonstrating:
 
 - **Deterministic Transactional Source Modeling**: Compact B2B SaaS subscription domain with referential integrity and explicit PySpark schemas (pinned to PySpark 3.5.x).
-- **High-Watermark Incremental Processing**: Fast, lightweight query-based incremental extraction using timestamps (`updated_at`).
+- **Transactional Watermark Incremental Ingestion**: Query-based incremental extraction using composite cursors `(updated_at, primary_key)` with SQLite control tables, optimistic concurrency versioning, and deterministic batch identities.
 - **Change Data Capture (CDC) Event Streaming**: Granular transaction log replication capturing inserts, updates, and physical deletes with before and after images derived directly from the actual source state.
 - **Authoritative Event Sequencing**: Strict out-of-order and duplicate reconciliation using monotonically increasing sequence numbers (strictly monotonic per business key without using `event_timestamp` as a tiebreaker).
 - **Golden Mutation Oracle**: In-memory transactional engine providing the exact ground truth for downstream lakehouse validation, with true deep-copy state isolation.
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│                               SOURCE LAYER                                       │
-│                                                                                  │
-│   ┌──────────────┐     ┌───────────────┐     ┌──────────────┐     ┌───────────┐  │
-│   │   accounts   │───► │ subscriptions │───► │   invoices   │───► │  payments │  │
-│   └──────────────┘     └───────────────┘     └──────────────┘     └───────────┘  │
-└──────────────────────────┬───────────────────────────┬───────────────────────────┘
-                           │                           │
-          [Initial Snapshot Export]             [CDC Event Stream]
-                           │                           │
-                           ▼                           ▼
-        ┌─────────────────────────────┐   ┌─────────────────────────────┐
-        │    data/source_snapshot/    │   │      data/cdc_landing/      │
-        │      (Parquet Files)        │   │       (JSONL Batches)       │
-        └──────────────┬──────────────┘   └──────────────┬──────────────┘
-                       │                                 │
-                       └────────────────┬────────────────┘
-                                        │
-                                        ▼
-                         ┌─────────────────────────────┐
-                         │   Source Mutation Engine    │
-                         │   (Reconciliation Oracle)   │
-                         └─────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│                                     SOURCE LAYER                                       │
+│                                                                                        │
+│   ┌──────────────┐       ┌───────────────┐       ┌──────────────┐     ┌───────────┐    │
+│   │   accounts   │─────► │ subscriptions │─────► │   invoices   │───► │  payments │    │
+│   └──────────────┘       └───────────────┘       └──────────────┘     └───────────┘    │
+└──────────┬───────────────────────┬──────────────────────────────────────────┬──────────┘
+           │                       │                                          │
+   [Snapshot Export]       [Watermark Ingestion]                      [CDC Event Stream]
+           │                       │                                          │
+           ▼                       ▼                                          ▼
+┌─────────────────────┐ ┌───────────────────────────────┐ ┌─────────────────────────────┐
+│data/source_snapshot/│ │   data/watermark_landing/     │ │      data/cdc_landing/      │
+│   (Parquet Files)   │ │ table=X/batch_id=Y/data.jsonl │ │       (JSONL Batches)       │
+└──────────┬──────────┘ └──────────────┬────────────────┘ └──────────────┬──────────────┘
+           │                           │                                 │
+           │                           ▼                                 │
+           │            ┌───────────────────────────────┐                │
+           │            │     SQLite Control Store      │                │
+           │            │  (watermark_state & audits)   │                │
+           │            └───────────────────────────────┘                │
+           │                                                             │
+           └───────────────────────────┬─────────────────────────────────┘
+                                       │
+                                       ▼
+                        ┌─────────────────────────────┐
+                        │   Source Mutation Engine    │
+                        │   (Reconciliation Oracle)   │
+                        └─────────────────────────────┘
 ```
 
 ---
@@ -76,7 +82,39 @@ Without a CDC replication stream emitting explicit `DELETE` events (or applicati
 
 ---
 
-## 3. Business Domain & Data Contracts
+## 3. Watermark Incremental Ingestion Architecture
+
+### Composite Watermark Cursors
+Single-column timestamp watermarks risk skipping rows or re-ingesting duplicates when multiple records share the exact same timestamp. Module 2 implements a composite cursor pairing `updated_at` with the table's primary key:
+
+$$\text{LOW} < (\text{updated\_at}, \text{primary\_key}) \le \text{HIGH}$$
+
+- **LOW (Exclusive)**: `(updated_at > low_ts) OR (updated_at = low_ts AND primary_key > low_key)`
+- **HIGH (Inclusive)**: `(updated_at < high_ts) OR (updated_at = high_ts AND primary_key <= high_key)`
+
+### Frozen High-Watermark Window
+To prevent mid-query transaction commits from corrupting extraction windows, the pipeline captures the current maximum source watermark (`HIGH`) before querying, freezing the extraction boundary.
+
+### Durable SQLite Control Store
+Durable local metadata management tracking:
+- `watermark_state`: Table name, cursor columns, last committed composite watermark, version, last run ID, update timestamp.
+- `watermark_run_audit`: Execution attempt history (`RUNNING`, `SUCCESS`, `NO_DATA`, `FAILED`), row counts, and landing paths.
+- **Optimistic Concurrency**: Compare-and-swap SQL version verification (`UPDATE ... WHERE table_name = ? AND version = ?`) preventing concurrent writer collisions (`WatermarkConcurrencyError`).
+
+### Transactional Checkpointing Order
+1. Start run audit (`RUNNING`)
+2. Read `LOW` watermark
+3. Capture `HIGH` watermark
+4. If `HIGH <= LOW`: mark `NO_DATA`, exit without advancing watermark
+5. Extract bounded rows
+6. Write landing output (`data/watermark_landing/table=<t>/batch_id=<b>/data.jsonl`)
+7. Verify file existence and row count
+8. Commit watermark checkpoint (optimistic concurrency version check)
+9. Mark run audit `SUCCESS`
+
+---
+
+## 4. Business Domain & Data Contracts
 
 The platform models a high-fidelity B2B SaaS subscription lifecycle:
 
@@ -94,7 +132,6 @@ The platform models a high-fidelity B2B SaaS subscription lifecycle:
 ```
 
 ### Table Schemas
-
 1. **`accounts`**: `account_id` (PK), `account_name`, `industry`, `country`, `status`, `created_at`, `updated_at`.
 2. **`subscriptions`**: `subscription_id` (PK), `account_id` (FK), `plan_name`, `billing_cycle`, `monthly_amount` (Decimal), `status`, `start_date`, `end_date`, `created_at`, `updated_at`.
 3. **`invoices`**: `invoice_id` (PK), `subscription_id` (FK), `invoice_date`, `due_date`, `invoice_amount` (Decimal), `invoice_status`, `created_at`, `updated_at`.
@@ -105,64 +142,6 @@ The platform models a high-fidelity B2B SaaS subscription lifecycle:
 - **Subscriptions**: 60 records
 - **Invoices**: 120 records
 - **Payments**: 90 records
-
----
-
-## 4. CDC Event Model & Ordering Contract
-
-Every change event follows a strict, strongly typed contract derived directly from the source snapshot baseline:
-
-```json
-{
-  "event_id": "evt_upd_sub_0001",
-  "table_name": "subscriptions",
-  "operation": "UPDATE",
-  "business_key": {"subscription_id": "SUB-0001"},
-  "sequence_number": 15,
-  "event_timestamp": "2026-04-01T10:35:00Z",
-  "source_commit_timestamp": "2026-04-01T10:35:01Z",
-  "batch_id": "batch_001",
-  "before_payload": {
-    "subscription_id": "SUB-0001",
-    "account_id": "ACC-0001",
-    "plan_name": "STARTER",
-    "billing_cycle": "ANNUAL",
-    "monthly_amount": "49.00",
-    "status": "PAUSED",
-    "start_date": "2026-03-06",
-    "end_date": null,
-    "created_at": "2026-03-06T00:00:00Z",
-    "updated_at": "2026-03-06T16:00:00Z"
-  },
-  "payload": {
-    "subscription_id": "SUB-0001",
-    "account_id": "ACC-0001",
-    "plan_name": "ENTERPRISE",
-    "billing_cycle": "ANNUAL",
-    "monthly_amount": "1299.00",
-    "status": "PAUSED",
-    "start_date": "2026-03-06",
-    "end_date": null,
-    "created_at": "2026-03-06T00:00:00Z",
-    "updated_at": "2026-04-01T10:35:00Z"
-  },
-  "source_system": "b2b_saas_postgres"
-}
-```
-
-### Authoritative Sequencing: `sequence_number` vs `event_timestamp`
-- **`sequence_number`**: Monotonically increasing sequence assigned by the database transaction commit log (WAL LSN). **Strictly authoritative for ordering**. A change event with `sequence_number <= current_max_seq` is rejected as stale/non-monotonic.
-- **`event_timestamp`**: Application event time. Subject to clock drift, server skew, and network retries. **Never used as an authoritative tiebreaker** between conflicting sequence states.
-- **`source_commit_timestamp`**: Timestamp when the transaction committed to disk in the source database.
-- **`batch_id`**: Ingestion file chunking/partitioning grouping, **not** business ordering.
-
-### Streaming Anomalies Handled Deterministically
-1. **Source State Truth**: All `before_payload` images are derived directly from the actual deterministic source snapshot rather than hard-coded fictional values.
-2. **Field Preservation**: `payload` preserves all untouched source columns and modifies only business fields and `updated_at`.
-3. **Duplicate Events**: At-least-once delivery duplicates are filtered via `event_id` tracking and sequence checks.
-4. **Out-of-Order Delivery**: Tested both with pre-sorting and in raw arrival order (`sort_by_sequence=False`) where `seq 102` is accepted and `seq 101` is rejected as stale.
-5. **Late-Arriving Events**: Historical events arriving in future batches are merged only if their sequence number exceeds current target state.
-6. **Quarantine Fixtures**: Missing PK, missing sequence number, negative sequence, invalid operation (`TRUNCATE`), and missing delete before-image are validated and quarantined.
 
 ---
 
@@ -177,6 +156,7 @@ incremental-cdc-data-platform/
 ├── README.md
 ├── docs/
 │   ├── 01_CDC_FOUNDATIONS.md
+│   ├── 02_WATERMARK_INCREMENTAL_INGESTION.md
 │   └── PROGRESS.md
 ├── src/
 │   ├── source/
@@ -188,6 +168,12 @@ incremental-cdc-data-platform/
 │   │   ├── validator.py         # Structural & semantic CDC validator
 │   │   ├── generator.py         # Deterministic multi-scenario change batches
 │   │   └── serialization.py     # Deterministic JSONL serialization & I/O
+│   ├── watermark/
+│   │   ├── models.py            # CompositeWatermark & audit domain models
+│   │   ├── control_store.py     # Durable SQLite control store & concurrency
+│   │   ├── source_adapter.py    # Bounded composite watermark extractor
+│   │   ├── landing.py           # Deterministic batch hashing & landing writer
+│   │   └── pipeline.py          # Transactional watermark orchestrator
 │   └── utils/
 │       └── helpers.py           # Date, Decimal, and path utilities
 ├── tests/
@@ -199,16 +185,23 @@ incremental-cdc-data-platform/
 │   │   ├── test_cdc_validator.py
 │   │   ├── test_cdc_generator.py
 │   │   ├── test_mutation_engine.py
-│   │   └── test_serialization.py
+│   │   ├── test_serialization.py
+│   │   ├── test_watermark_models.py
+│   │   ├── test_watermark_control_store.py
+│   │   ├── test_watermark_source_adapter.py
+│   │   └── test_watermark_landing.py
 │   └── integration/
-│       └── test_end_to_end_simulator.py
+│       ├── test_end_to_end_simulator.py
+│       └── test_watermark_pipeline.py
 └── data/
     ├── source_snapshot/         # Local Parquet initial snapshots
     │   ├── accounts/.gitkeep
     │   ├── subscriptions/.gitkeep
     │   ├── invoices/.gitkeep
     │   └── payments/.gitkeep
-    └── cdc_landing/             # Partitioned raw JSONL change streams
+    ├── cdc_landing/             # Partitioned raw JSONL change streams
+    │   └── .gitkeep
+    └── watermark_landing/       # Partitioned incremental watermark landing
         └── .gitkeep
 ```
 
@@ -228,7 +221,7 @@ pip install -r requirements-dev.txt
 pip install -e .
 ```
 
-### Run Full Test Suite
+### Run Full Test Suite (61 tests)
 
 ```bash
 pytest -v
@@ -250,10 +243,10 @@ python -m build --wheel
 
 ## 7. Project Roadmap (Modules 1–6)
 
-- [x] **Module 1: Source System + Deterministic CDC Event Simulator** *(CURRENT)*
+- [x] **Module 1: Source System + Deterministic CDC Event Simulator** *(FROZEN / COMPLETE)*
   - Synthetic B2B SaaS generator, Parquet initial snapshots, CDC event generator (Inserts, Updates, Deletes, Dups, Out-of-Order, Late, Quarantine), Structured Validator, In-memory Mutation Engine.
-- [ ] **Module 2: Watermark Incremental Ingestion + Control Tables**
-  - High-watermark metadata state tracking, incremental delta extraction, watermark control tables.
+- [x] **Module 2: Transactional Watermark Incremental Ingestion + Control Tables** *(COMPLETED)*
+  - Durable SQLite control tables, composite cursors `(updated_at, PK)`, bounded window extraction, optimistic concurrency versioning, failure recovery, physical delete blind-spot testing.
 - [ ] **Module 3: CDC Normalization, Ordering, Dedupe & Quarantine**
   - Bronze landing ingestion, PySpark window-based deduplication, authoritative sequence ordering, dead-letter quarantine routing.
 - [ ] **Module 4: Delta MERGE, Deletes, Replay & Recovery**

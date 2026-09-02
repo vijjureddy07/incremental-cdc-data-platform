@@ -27,7 +27,7 @@ class CDCScenarioGenerator:
 
     def __init__(self, source_generator: SourceGenerator | None = None) -> None:
         self.source_gen = source_generator or SourceGenerator()
-        self.base_time = self.source_gen.config.base_timestamp + timedelta(days=90)
+        self.base_time = self.source_gen.config.base_timestamp + timedelta(days=130)
         self._init_snapshot_state()
 
     def _init_snapshot_state(self) -> None:
@@ -301,7 +301,8 @@ class CDCScenarioGenerator:
         # ----------------------------------------------------------------------
         # Scenario D: Duplicate CDC Event
         # ----------------------------------------------------------------------
-        # Re-emitting exact duplicate of evt_ins_acc_0041
+        # Re-emitting exact duplicate of evt_ins_acc_0041 from Batch 1
+        dup_acc_ts = self.base_time + timedelta(hours=1, minutes=5)
         events.append(
             CDCEvent(
                 event_id="evt_ins_acc_0041",  # Same event_id as in Batch 1
@@ -309,8 +310,8 @@ class CDCScenarioGenerator:
                 operation=CDCOperation.INSERT.value,
                 business_key={"account_id": "ACC-0041"},
                 sequence_number=1,
-                event_timestamp="2026-04-01T01:05:00Z",
-                source_commit_timestamp="2026-04-01T01:05:01Z",
+                event_timestamp=format_iso_timestamp(dup_acc_ts),
+                source_commit_timestamp=format_iso_timestamp(dup_acc_ts + timedelta(seconds=1)),
                 batch_id=batch_id,
                 payload={
                     "account_id": "ACC-0041",
@@ -318,8 +319,8 @@ class CDCScenarioGenerator:
                     "industry": "Fintech",
                     "country": "US",
                     "status": "ACTIVE",
-                    "created_at": "2026-04-01T01:05:00Z",
-                    "updated_at": "2026-04-01T01:05:00Z",
+                    "created_at": format_iso_timestamp(dup_acc_ts),
+                    "updated_at": format_iso_timestamp(dup_acc_ts),
                 },
                 before_payload=None,
                 source_system="b2b_saas_postgres",
