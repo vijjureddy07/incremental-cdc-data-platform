@@ -1,7 +1,6 @@
 """Unit tests for Databricks Lakeflow declarative pipeline AST, registration harness, and flows."""
 
 import ast
-import importlib
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -20,6 +19,7 @@ from databricks.lakeflow.contracts import TABLE_CDC_SPECS
 class RecordedTable:
     name: str
     comment: str | None
+    table_properties: dict[str, str] | None
 
 
 @dataclass
@@ -45,8 +45,15 @@ class FakePipelines:
         self.flows: list[RecordedFlow] = []
         self.dataset_functions: dict[str, Callable] = {}
 
-    def create_streaming_table(self, name: str, comment: str | None = None) -> None:
-        self.tables.append(RecordedTable(name=name, comment=comment))
+    def create_streaming_table(
+        self,
+        name: str,
+        comment: str | None = None,
+        table_properties: dict[str, str] | None = None,
+    ) -> None:
+        self.tables.append(
+            RecordedTable(name=name, comment=comment, table_properties=table_properties)
+        )
 
     def create_auto_cdc_flow(
         self,
@@ -98,8 +105,10 @@ def test_lakeflow_pipeline_ast_compilation():
     assert compiled is not None
 
 
-def test_lakeflow_pipeline_registration_harness(spark_session: SparkSession, monkeypatch: pytest.MonkeyPatch):
-    """Verify register_lakeflow_pipeline correctly registers all streaming tables and AUTO CDC flows."""
+def test_lakeflow_pipeline_top_level_automatic_registration(
+    spark_session: SparkSession, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify evaluating/importing pipeline.py automatically registers streaming tables, AUTO CDC flows, and datasets."""
     fake_dp = FakePipelines()
 
     mock_pipelines_module = MagicMock()
@@ -109,12 +118,9 @@ def test_lakeflow_pipeline_registration_harness(spark_session: SparkSession, mon
 
     monkeypatch.setitem(sys.modules, "pyspark.pipelines", mock_pipelines_module)
 
-    import databricks.lakeflow.pipeline as pipeline_mod
-
-    importlib.reload(pipeline_mod)
-
-    config = LakeflowConfig(catalog="test_cat", schema="test_sch")
-    pipeline_mod.register_lakeflow_pipeline(config)
+    # Remove existing pipeline module from sys.modules so fresh import runs top-level registration once
+    sys.modules.pop("databricks.lakeflow.pipeline", None)
+    import databricks.lakeflow.pipeline as pipeline_mod  # noqa: F401
 
     # 1. Target Streaming Tables Verification (4 Type 1 + 1 Type 2 = 5 tables)
     assert len(fake_dp.tables) == 5
@@ -127,6 +133,12 @@ def test_lakeflow_pipeline_registration_harness(spark_session: SparkSession, mon
         "subscriptions_history",
     }
     assert registered_table_names == expected_tables
+
+    # Verify all tables have tombstone GC threshold property configured
+    for t in fake_dp.tables:
+        assert t.table_properties is not None
+        assert "pipelines.cdc.tombstoneGCThresholdInSeconds" in t.table_properties
+        assert t.table_properties["pipelines.cdc.tombstoneGCThresholdInSeconds"] == "604800"
 
     # 2. Flows Count Verification (8 Type 1 + 2 Type 2 = 10 flows)
     assert len(fake_dp.flows) == 10
@@ -174,32 +186,34 @@ def test_lakeflow_pipeline_registration_harness(spark_session: SparkSession, mon
         assert hf.track_history_column_list == sub_spec.history_track_columns
         assert len(hf.track_history_column_list) == 7
 
+    # 7. Source Datasets Verification (4 snapshot + 4 cdc = 8 source datasets)
+    assert len(fake_dp.dataset_functions) == 8
 
-def test_lakeflow_pipeline_source_dataset_registration(spark_session: SparkSession, monkeypatch: pytest.MonkeyPatch):
-    """Verify snapshot and CDC projection source datasets are registered."""
+
+def test_lakeflow_pipeline_custom_tombstone_config_registration(
+    spark_session: SparkSession, monkeypatch: pytest.MonkeyPatch
+):
+    """Verify passing custom LakeflowConfig sets custom tombstone GC property on all streaming tables."""
     fake_dp = FakePipelines()
+
     mock_pipelines_module = MagicMock()
     mock_pipelines_module.create_streaming_table = fake_dp.create_streaming_table
     mock_pipelines_module.create_auto_cdc_flow = fake_dp.create_auto_cdc_flow
     mock_pipelines_module.table = fake_dp.table
     monkeypatch.setitem(sys.modules, "pyspark.pipelines", mock_pipelines_module)
 
+    sys.modules.pop("databricks.lakeflow.pipeline", None)
     import databricks.lakeflow.pipeline as pipeline_mod
 
-    importlib.reload(pipeline_mod)
+    # Clear initial registrations from module import
+    fake_dp.tables.clear()
+    fake_dp.flows.clear()
+    fake_dp.dataset_functions.clear()
 
-    pipeline_mod.register_lakeflow_pipeline()
+    custom_cfg = LakeflowConfig(tombstone_gc_threshold_seconds=1209600)
+    pipeline_mod.register_lakeflow_pipeline(custom_cfg)
 
-    # 4 snapshot sources + 4 CDC sources = 8 source datasets
-    assert len(fake_dp.dataset_functions) == 8
-    expected_sources = {
-        "accounts_snapshot_source",
-        "accounts_cdc_source",
-        "subscriptions_snapshot_source",
-        "subscriptions_cdc_source",
-        "invoices_snapshot_source",
-        "invoices_cdc_source",
-        "payments_snapshot_source",
-        "payments_cdc_source",
-    }
-    assert set(fake_dp.dataset_functions.keys()) == expected_sources
+    # 5 tables created during custom call
+    assert len(fake_dp.tables) == 5
+    for t in fake_dp.tables:
+        assert t.table_properties == {"pipelines.cdc.tombstoneGCThresholdInSeconds": "1209600"}

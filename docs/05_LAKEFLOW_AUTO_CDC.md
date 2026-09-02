@@ -65,46 +65,76 @@ flowchart TD
 
 ## 2. Modern Lakeflow Declarative API
 
-Module 5 adheres strictly to the current Databricks Lakeflow Declarative Pipeline Python and SQL APIs:
+Module 5 adheres strictly to current Databricks Lakeflow Declarative Pipeline Python and SQL APIs:
 
 - **Python API**:
   ```python
   from pyspark import pipelines as dp
 
-  dp.create_streaming_table(name="...", comment="...")
+  dp.create_streaming_table(
+      name="accounts_current",
+      comment="...",
+      table_properties={"pipelines.cdc.tombstoneGCThresholdInSeconds": "604800"},
+  )
   dp.create_auto_cdc_flow(
-      name="...",
-      target="...",
-      source="...",
-      keys=["..."],
+      name="accounts_continuous_cdc",
+      target="accounts_current",
+      source="accounts_cdc_source",
+      keys=["account_id"],
       sequence_by="sequence_number",
-      stored_as_scd_type=1,  # or 2
-      ...
+      apply_as_deletes=F.expr("operation = 'DELETE'"),
+      stored_as_scd_type=1,
+      except_column_list=["operation", "sequence_number"],
+      ignore_null_updates=False,
   )
   ```
 - **SQL Reference API**:
   ```sql
-  CREATE OR REFRESH STREAMING TABLE accounts_current;
-  CREATE FLOW accounts_initial_hydration AS AUTO CDC ONCE INTO accounts_current ...;
-  CREATE FLOW accounts_continuous_cdc AS AUTO CDC INTO accounts_current ...;
+  CREATE OR REFRESH STREAMING TABLE accounts_current
+  COMMENT 'Current-state accounts table managed by Lakeflow AUTO CDC'
+  TBLPROPERTIES ("pipelines.cdc.tombstoneGCThresholdInSeconds" = "604800");
+
+  CREATE FLOW accounts_initial_hydration
+  AS AUTO CDC ONCE INTO accounts_current
+  FROM stream(accounts_snapshot_source)
+  KEYS (account_id)
+  SEQUENCE BY sequence_number
+  COLUMNS * EXCEPT (operation, sequence_number)
+  STORED AS SCD TYPE 1;
+
+  CREATE FLOW accounts_continuous_cdc
+  AS AUTO CDC INTO accounts_current
+  FROM stream(accounts_cdc_source)
+  KEYS (account_id)
+  APPLY AS DELETE WHEN operation = 'DELETE'
+  SEQUENCE BY sequence_number
+  COLUMNS * EXCEPT (operation, sequence_number)
+  STORED AS SCD TYPE 1;
   ```
 
 > [!IMPORTANT]
-> **API Migration Notice**: The deprecated `import dlt` module and legacy `dlt.apply_changes(...)` / `APPLY CHANGES INTO` syntax are not used in Module 5. All pipeline declarations use the unified Lakeflow Spark Declarative Pipeline constructs (`create_auto_cdc_flow` / `CREATE FLOW ... AS AUTO CDC`).
+> **API Modernization**: The deprecated `import dlt` module and legacy `dlt.apply_changes(...)` / `APPLY CHANGES INTO` syntax are not used. All pipeline declarations use modern Lakeflow Spark Declarative Pipeline constructs (`create_auto_cdc_flow` / `CREATE FLOW ... AS AUTO CDC`).
 
 ---
 
 ## 3. Upstream Ingestion Contracts & Source Projections
 
-Lakeflow AUTO CDC consumes two distinct upstream data assets established by earlier modules:
+Lakeflow AUTO CDC consumes two upstream data assets established by earlier modules:
 
 1. **Initial Hydration Source**:
-   - Consumes the frozen Module 1 synthetic Parquet snapshot (`data/source_snapshot/{table}.parquet`).
-   - Projecting a deterministic baseline sequence: `sequence_number = 0` (Long) and `operation = 'SNAPSHOT'`.
+   - Consumes the frozen Module 1 synthetic Parquet snapshot (`data/source_snapshot/{table}/snapshot.parquet`).
+   - Projects a deterministic baseline sequence: `sequence_number = 0` (Long) and `operation = 'SNAPSHOT'`.
    - Never uses arbitrary wall-clock timestamps for baseline ordering.
-2. **Continuous CDC Source**:
+2. **Continuous CDC Source (Databricks Auto Loader)**:
    - Consumes the frozen Module 3 accepted normalized CDC stream (`data/normalized_cdc/*/accepted.jsonl`).
-   - Does **not** consume dead-letter quarantine records or Module 2 watermark landing files.
+   - Uses Databricks Auto Loader (`cloudFiles`) with nested structured type inference:
+     ```python
+     spark.readStream.format("cloudFiles")
+     .option("cloudFiles.format", "json")
+     .option("cloudFiles.inferColumnTypes", "true")
+     .load(cdc_path)
+     ```
+   - Auto Loader preserves nested struct fields (`payload`, `before_payload`, `business_key`) necessary for expression evaluation.
    - Projects flat schema rows suitable for AUTO CDC:
      - **Primary Key**: Preserved for all operations by coalescing `payload.<pk>`, `before_payload.<pk>`, and `business_key.<pk>`. This ensures DELETE events always supply a non-null primary key.
      - **Business Fields**: Unnested from `payload`.
@@ -132,7 +162,12 @@ Every current-state table is targeted by exactly two distinct declarative AUTO C
    - Excludes CDC control fields (`operation`, `sequence_number`) from the final business target table schema via `except_column_list = ["operation", "sequence_number"]`.
 
 ```python
-dp.create_streaming_table(name="accounts_current")
+table_props = {"pipelines.cdc.tombstoneGCThresholdInSeconds": "604800"}
+dp.create_streaming_table(
+    name="accounts_current",
+    comment="Current-state accounts table managed by Lakeflow AUTO CDC",
+    table_properties=table_props,
+)
 
 # Flow 1: Hydration
 dp.create_auto_cdc_flow(
@@ -191,13 +226,13 @@ To preserve historical subscription changes (e.g., plan upgrades, price changes,
 
 In a distributed CDC pipeline, a `DELETE` event may arrive ahead of an earlier `UPDATE` or `INSERT` due to network reordering.
 
-- **Managed Tombstone Lifecycle**: When Lakeflow AUTO CDC processes a `DELETE`, it physically (or logically) removes the record from current state while maintaining an internal, time-bounded tombstone.
+- **Managed Tombstone Lifecycle**: When Lakeflow AUTO CDC processes a `DELETE`, it physically removes the record from current state while maintaining an internal, time-bounded tombstone.
 - **Out-of-Order Resurrection Protection**: If a delayed `INSERT` or `UPDATE` with a lower `sequence_number` arrives later, Lakeflow references the internal tombstone and ignores the stale resurrection attempt.
 - **Tombstone GC Tuning**:
   ```text
   pipelines.cdc.tombstoneGCThresholdInSeconds = 604800 (7 days)
   ```
-  The tombstone garbage collection threshold must always be configured to exceed the maximum anticipated event delay across the streaming infrastructure.
+  The tombstone garbage collection threshold is configured on all target streaming tables to exceed maximum possible event delay across upstream systems.
 
 ---
 
@@ -217,7 +252,7 @@ In a distributed CDC pipeline, a `DELETE` event may arrive ahead of an earlier `
 
 ## 8. Deployment Configuration & Environments
 
-Pipeline paths and catalog parameters are externalized through `LakeflowConfig` in [config.py](file:///Users/vijjureddy/Job%20Switch%20Projects/Incremental%20&%20CDC%20Data%20Pipeline/databricks/lakeflow/config.py):
+Pipeline paths and catalog parameters are externalized through `LakeflowConfig` in [config.py](../databricks/lakeflow/config.py):
 
 | Parameter | Default Value | Environment Variable Override | Spark Conf Override |
 | :--- | :--- | :--- | :--- |
@@ -233,12 +268,14 @@ Pipeline paths and catalog parameters are externalized through `LakeflowConfig` 
 ## 9. Verification & Execution Status
 
 ### Local Contract Verification (Passed)
-- **Syntax & AST Compilation**: [pipeline.py](file:///Users/vijjureddy/Job%20Switch%20Projects/Incremental%20&%20CDC%20Data%20Pipeline/databricks/lakeflow/pipeline.py) compiles cleanly with zero syntax errors.
-- **Registration Harness**: Verified 5 streaming tables (4 SCD1, 1 SCD2) and 10 AUTO CDC flows (5 hydration `once=True`, 5 continuous).
-- **Projections**: Verified non-null sequence assertion and primary key preservation on deletes.
+- **Syntax & AST Compilation**: [pipeline.py](../databricks/lakeflow/pipeline.py) compiles cleanly with zero syntax errors.
+- **Registration Harness**: Verified 5 streaming tables (4 SCD1, 1 SCD2) and 10 AUTO CDC flows (5 hydration `once=True`, 5 continuous) with configured tombstone properties.
+- **Projections**: Verified non-null sequence assertion, Auto Loader options (`cloudFiles`, `cloudFiles.inferColumnTypes`), and primary key preservation on deletes.
+- **SQL Reference**: Verified modern SQL syntax (`FROM stream(...)`, `APPLY AS DELETE WHEN`, `COLUMNS * EXCEPT`, `TRACK HISTORY ON`).
 - **API Guard**: Verified zero deprecated `apply_changes` or `APPLY CHANGES INTO` tokens in Module 5 files.
 - **Isolation**: Verified standard `src` package imports cleanly on local PySpark 3.5 without Databricks runtime.
 
-### Status Boundary
-- **Local Test Suite**: **173 passed unit & integration tests** (156 Modules 1–4 + 17 Module 5).
-- **Cloud Validation Status**: `NOT CLOUD EXECUTED / DEPLOYMENT READY` (Live pipeline execution, cluster provisioning, and event logs require an active Databricks workspace).
+### Status Boundary & Cloud Execution Honesty
+- **Local Contract Validation**: `PASSED` (Verifies syntax, AST structure, configuration parsing, Auto Loader options, registration calls, and SQL grammar).
+- **Cloud Validation Status**: `NOT EXECUTED / PENDING` (Live execution, cluster provisioning, Volume access, and event logs require deployment to an active Azure Databricks workspace).
+- **Overall Module Status**: `COMPLETE / CLOUD VALIDATION PENDING`.

@@ -14,27 +14,24 @@ class LakeflowConfig:
     snapshot_base_path: str = "/Volumes/main/cdc_portfolio/cdc_data/source_snapshot"
     normalized_cdc_base_path: str = "/Volumes/main/cdc_portfolio/cdc_data/normalized_cdc"
     tombstone_gc_threshold_seconds: int = 604800  # 7 days conservative default (must exceed max event lag)
-    target_prefix: str = ""
     ignore_null_updates: bool = False  # Module 3 produces full after-images; nulls represent intentional field resets
 
     @classmethod
     def from_env(cls) -> "LakeflowConfig":
-        """Instantiate configuration from environment variables with safe defaults."""
+        """Instantiate configuration from environment variables with safe defaults and dynamic Volume paths."""
+        catalog = os.getenv("LAKEFLOW_CATALOG", "main")
+        schema = os.getenv("LAKEFLOW_SCHEMA", "cdc_portfolio")
+        default_snapshot = f"/Volumes/{catalog}/{schema}/cdc_data/source_snapshot"
+        default_cdc = f"/Volumes/{catalog}/{schema}/cdc_data/normalized_cdc"
+
         return cls(
-            catalog=os.getenv("LAKEFLOW_CATALOG", "main"),
-            schema=os.getenv("LAKEFLOW_SCHEMA", "cdc_portfolio"),
-            snapshot_base_path=os.getenv(
-                "LAKEFLOW_SNAPSHOT_PATH",
-                "/Volumes/main/cdc_portfolio/cdc_data/source_snapshot",
-            ),
-            normalized_cdc_base_path=os.getenv(
-                "LAKEFLOW_NORMALIZED_CDC_PATH",
-                "/Volumes/main/cdc_portfolio/cdc_data/normalized_cdc",
-            ),
+            catalog=catalog,
+            schema=schema,
+            snapshot_base_path=os.getenv("LAKEFLOW_SNAPSHOT_PATH", default_snapshot),
+            normalized_cdc_base_path=os.getenv("LAKEFLOW_NORMALIZED_CDC_PATH", default_cdc),
             tombstone_gc_threshold_seconds=int(
                 os.getenv("LAKEFLOW_TOMBSTONE_GC_SECONDS", "604800")
             ),
-            target_prefix=os.getenv("LAKEFLOW_TARGET_PREFIX", ""),
             ignore_null_updates=os.getenv("LAKEFLOW_IGNORE_NULL_UPDATES", "false").lower() == "true",
         )
 
@@ -51,22 +48,31 @@ class LakeflowConfig:
             except Exception:
                 return default
 
+        catalog = get_conf("lakeflow.catalog", os.getenv("LAKEFLOW_CATALOG", "main"))
+        schema = get_conf("lakeflow.schema", os.getenv("LAKEFLOW_SCHEMA", "cdc_portfolio"))
+        default_snapshot = f"/Volumes/{catalog}/{schema}/cdc_data/source_snapshot"
+        default_cdc = f"/Volumes/{catalog}/{schema}/cdc_data/normalized_cdc"
+
         return cls(
-            catalog=get_conf("lakeflow.catalog", os.getenv("LAKEFLOW_CATALOG", "main")),
-            schema=get_conf("lakeflow.schema", os.getenv("LAKEFLOW_SCHEMA", "cdc_portfolio")),
+            catalog=catalog,
+            schema=schema,
             snapshot_base_path=get_conf(
                 "lakeflow.snapshot_base_path",
-                os.getenv("LAKEFLOW_SNAPSHOT_PATH", "/Volumes/main/cdc_portfolio/cdc_data/source_snapshot"),
+                os.getenv("LAKEFLOW_SNAPSHOT_PATH", default_snapshot),
             ),
             normalized_cdc_base_path=get_conf(
                 "lakeflow.normalized_cdc_base_path",
-                os.getenv("LAKEFLOW_NORMALIZED_CDC_PATH", "/Volumes/main/cdc_portfolio/cdc_data/normalized_cdc"),
+                os.getenv("LAKEFLOW_NORMALIZED_CDC_PATH", default_cdc),
             ),
             tombstone_gc_threshold_seconds=int(
                 get_conf("lakeflow.tombstone_gc_seconds", os.getenv("LAKEFLOW_TOMBSTONE_GC_SECONDS", "604800"))
             ),
-            target_prefix=get_conf("lakeflow.target_prefix", os.getenv("LAKEFLOW_TARGET_PREFIX", "")),
             ignore_null_updates=get_conf(
                 "lakeflow.ignore_null_updates", os.getenv("LAKEFLOW_IGNORE_NULL_UPDATES", "false")
             ).lower() == "true",
         )
+
+
+def build_snapshot_path(table_name: str, config: LakeflowConfig) -> str:
+    """Construct the Parquet snapshot file path matching Module 1 directory layout."""
+    return f"{config.snapshot_base_path}/{table_name}/snapshot.parquet"

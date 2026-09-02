@@ -324,7 +324,7 @@ pip install -r requirements-dev.txt
 pip install -e .
 ```
 
-### Run Full Test Suite (173 tests)
+### Run Full Test Suite (177 tests)
 
 ```bash
 pytest -v

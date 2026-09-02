@@ -8,7 +8,7 @@ and SCD Type 2 history tables.
 from pyspark import pipelines as dp
 from pyspark.sql import functions as F
 
-from databricks.lakeflow.config import LakeflowConfig
+from databricks.lakeflow.config import LakeflowConfig, build_snapshot_path
 from databricks.lakeflow.contracts import TABLE_CDC_SPECS, TableCDCSpec
 
 
@@ -26,7 +26,7 @@ def build_snapshot_projection(table_name: str, config: LakeflowConfig) -> str:
         from pyspark.sql import SparkSession
 
         spark = SparkSession.getActiveSession()
-        snapshot_path = f"{config.snapshot_base_path}/{table_name}.parquet"
+        snapshot_path = build_snapshot_path(table_name, config)
 
         # Read snapshot Parquet files
         raw_df = spark.read.parquet(snapshot_path)
@@ -56,8 +56,13 @@ def build_cdc_projection(table_name: str, config: LakeflowConfig) -> str:
         spark = SparkSession.getActiveSession()
         cdc_path = f"{config.normalized_cdc_base_path}/*/accepted.jsonl"
 
-        # Read normalized CDC change stream via cloudFiles / JSON stream
-        raw_stream = spark.readStream.format("json").load(cdc_path)
+        # Read normalized CDC change stream via Databricks Auto Loader (cloudFiles)
+        raw_stream = (
+            spark.readStream.format("cloudFiles")
+            .option("cloudFiles.format", "json")
+            .option("cloudFiles.inferColumnTypes", "true")
+            .load(cdc_path)
+        )
 
         # Filter strictly for this table's events
         table_events = raw_stream.filter(F.col("table_name") == spec.source_table)
@@ -101,12 +106,17 @@ def build_cdc_projection(table_name: str, config: LakeflowConfig) -> str:
 
 def register_auto_cdc_flows_for_spec(spec: TableCDCSpec, config: LakeflowConfig) -> None:
     """Register SCD Type 1 current table and optional SCD Type 2 history table with AUTO CDC flows."""
+    table_properties = {
+        "pipelines.cdc.tombstoneGCThresholdInSeconds": str(config.tombstone_gc_threshold_seconds)
+    }
+
     # ---------------------------------------------------------
     # 1. SCD Type 1 Current-State Target Table
     # ---------------------------------------------------------
     dp.create_streaming_table(
         name=spec.target_table_current,
         comment=f"Current-state {spec.source_table} table managed by Lakeflow AUTO CDC",
+        table_properties=table_properties,
     )
 
     # Hydration Flow (once=True): seeds target with initial snapshot (sequence_number = 0)
@@ -147,6 +157,7 @@ def register_auto_cdc_flows_for_spec(spec: TableCDCSpec, config: LakeflowConfig)
         dp.create_streaming_table(
             name=spec.target_table_history,
             comment=f"Historical SCD Type 2 audit table for {spec.source_table} managed by Lakeflow AUTO CDC",
+            table_properties=table_properties,
         )
 
         # SCD2 Initial Hydration Flow (once=True)
@@ -182,12 +193,11 @@ def register_lakeflow_pipeline(config: LakeflowConfig | None = None) -> None:
     """Orchestrate full Lakeflow Declarative Pipeline registration."""
     cfg = config or LakeflowConfig.from_env()
 
-    for table_name, spec in TABLE_CDC_SPECS.items():
-        build_snapshot_projection(table_name, cfg)
-        build_cdc_projection(table_name, cfg)
+    for spec in TABLE_CDC_SPECS.values():
+        build_snapshot_projection(spec.source_table, cfg)
+        build_cdc_projection(spec.source_table, cfg)
         register_auto_cdc_flows_for_spec(spec, cfg)
 
 
-# Execute registration when executed as a Lakeflow pipeline script
-if __name__ == "__main__" or "pyspark.pipelines" in globals():
-    register_lakeflow_pipeline()
+# Register declarative pipeline definitions upon module evaluation
+register_lakeflow_pipeline()

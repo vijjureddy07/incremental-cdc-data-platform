@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from databricks.lakeflow.config import LakeflowConfig
+from databricks.lakeflow.config import LakeflowConfig, build_snapshot_path
 from databricks.lakeflow.contracts import TABLE_CDC_SPECS
 
 
@@ -16,7 +16,6 @@ def test_lakeflow_config_defaults():
     assert cfg.snapshot_base_path == "/Volumes/main/cdc_portfolio/cdc_data/source_snapshot"
     assert cfg.normalized_cdc_base_path == "/Volumes/main/cdc_portfolio/cdc_data/normalized_cdc"
     assert cfg.tombstone_gc_threshold_seconds == 604800
-    assert cfg.target_prefix == ""
     assert cfg.ignore_null_updates is False
 
 
@@ -27,7 +26,6 @@ def test_lakeflow_config_from_env(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("LAKEFLOW_SNAPSHOT_PATH", "/Volumes/prod/finance/snapshots")
     monkeypatch.setenv("LAKEFLOW_NORMALIZED_CDC_PATH", "/Volumes/prod/finance/cdc")
     monkeypatch.setenv("LAKEFLOW_TOMBSTONE_GC_SECONDS", "1209600")
-    monkeypatch.setenv("LAKEFLOW_TARGET_PREFIX", "stg_")
     monkeypatch.setenv("LAKEFLOW_IGNORE_NULL_UPDATES", "true")
 
     cfg = LakeflowConfig.from_env()
@@ -36,8 +34,40 @@ def test_lakeflow_config_from_env(monkeypatch: pytest.MonkeyPatch):
     assert cfg.snapshot_base_path == "/Volumes/prod/finance/snapshots"
     assert cfg.normalized_cdc_base_path == "/Volumes/prod/finance/cdc"
     assert cfg.tombstone_gc_threshold_seconds == 1209600
-    assert cfg.target_prefix == "stg_"
     assert cfg.ignore_null_updates is True
+
+
+def test_lakeflow_config_dynamic_volume_paths(monkeypatch: pytest.MonkeyPatch):
+    """Verify dynamic derivation of Volume paths when catalog/schema are set without explicit paths."""
+    monkeypatch.setenv("LAKEFLOW_CATALOG", "analytics_prod")
+    monkeypatch.setenv("LAKEFLOW_SCHEMA", "subscription_pipeline")
+    monkeypatch.delenv("LAKEFLOW_SNAPSHOT_PATH", raising=False)
+    monkeypatch.delenv("LAKEFLOW_NORMALIZED_CDC_PATH", raising=False)
+
+    cfg = LakeflowConfig.from_env()
+    assert cfg.snapshot_base_path == "/Volumes/analytics_prod/subscription_pipeline/cdc_data/source_snapshot"
+    assert cfg.normalized_cdc_base_path == "/Volumes/analytics_prod/subscription_pipeline/cdc_data/normalized_cdc"
+
+
+def test_build_snapshot_path_matches_module1_layout():
+    """Verify build_snapshot_path resolves to {base_path}/{table_name}/snapshot.parquet matching Module 1."""
+    cfg = LakeflowConfig(snapshot_base_path="/Volumes/main/cdc/snapshots")
+    assert build_snapshot_path("accounts", cfg) == "/Volumes/main/cdc/snapshots/accounts/snapshot.parquet"
+    assert (
+        build_snapshot_path("subscriptions", cfg) == "/Volumes/main/cdc/snapshots/subscriptions/snapshot.parquet"
+    )
+    assert build_snapshot_path("invoices", cfg) == "/Volumes/main/cdc/snapshots/invoices/snapshot.parquet"
+    assert build_snapshot_path("payments", cfg) == "/Volumes/main/cdc/snapshots/payments/snapshot.parquet"
+
+
+def test_pipeline_uses_auto_loader_cloudfiles():
+    """Verify that pipeline.py uses Databricks Auto Loader (cloudFiles) with nested column inference."""
+    pipeline_code = Path("databricks/lakeflow/pipeline.py").read_text(encoding="utf-8")
+
+    assert '.format("cloudFiles")' in pipeline_code
+    assert '.option("cloudFiles.format", "json")' in pipeline_code
+    assert '.option("cloudFiles.inferColumnTypes", "true")' in pipeline_code
+    assert 'readStream.format("json")' not in pipeline_code
 
 
 def test_table_cdc_specs_completeness():
@@ -132,20 +162,32 @@ def test_no_deprecated_api_in_module5_files():
             assert token not in content, f"Found banned deprecated token '{token}' in {file_path}"
 
 
-def test_sql_reference_contains_auto_cdc_and_scd2():
-    """Verify SQL reference implementation contains modern AUTO CDC ONCE and SCD Type 2 statements."""
+def test_sql_reference_modern_grammar_tokens():
+    """Verify SQL reference implementation uses modern AUTO CDC grammar and lacks obsolete tokens."""
     sql_path = Path("databricks/lakeflow/sql/auto_cdc_reference.sql")
     content = sql_path.read_text(encoding="utf-8")
 
-    assert "CREATE FLOW accounts_initial_hydration" in content
-    assert "AS AUTO CDC ONCE" in content
-    assert "CREATE FLOW accounts_continuous_cdc" in content
-    assert "AS AUTO CDC" in content
-    assert "APPLY AS DELETES (operation = 'DELETE')" in content
-    assert "STORED AS SCD TYPE 1" in content
-    assert "CREATE OR REFRESH STREAMING TABLE subscriptions_history" in content
-    assert "STORED AS SCD TYPE 2" in content
-    assert "TRACK (account_id, plan_name, billing_cycle, monthly_amount, status, start_date, end_date)" in content
+    # Positive modern tokens
+    assert "FROM stream(" in content
+    assert "APPLY AS DELETE WHEN operation = 'DELETE'" in content
+    assert "COLUMNS * EXCEPT (operation, sequence_number)" in content
+    assert "TRACK HISTORY ON (" in content
+    assert 'TBLPROPERTIES ("pipelines.cdc.tombstoneGCThresholdInSeconds"' in content
+    assert "AS AUTO CDC ONCE INTO" in content
+    assert "AS AUTO CDC INTO" in content
+
+    # Negative obsolete tokens
+    assert "APPLY AS DELETES" not in content
+    assert "TRACK (" not in content
+
+
+def test_no_absolute_user_paths_in_module5_docs():
+    """Verify that docs/05_LAKEFLOW_AUTO_CDC.md contains no machine-local /Users/ file paths."""
+    doc_path = Path("docs/05_LAKEFLOW_AUTO_CDC.md")
+    if doc_path.exists():
+        content = doc_path.read_text(encoding="utf-8")
+        assert "file:///Users/" not in content
+        assert "/Users/vijjureddy" not in content
 
 
 def test_normal_package_import_isolation():

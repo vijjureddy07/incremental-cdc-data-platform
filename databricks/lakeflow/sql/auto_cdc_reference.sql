@@ -15,138 +15,149 @@
 -- 1. ACCOUNTS (SCD Type 1 Current-State)
 -- ============================================================================
 CREATE OR REFRESH STREAMING TABLE accounts_current
-COMMENT 'Current-state accounts table managed by Lakeflow AUTO CDC';
+COMMENT 'Current-state accounts table managed by Lakeflow AUTO CDC'
+TBLPROPERTIES ("pipelines.cdc.tombstoneGCThresholdInSeconds" = "604800");
 
 -- Flow 1A: Initial Snapshot Hydration (once=true)
 CREATE FLOW accounts_initial_hydration
-AS AUTO CDC ONCE
-INTO accounts_current
-FROM accounts_snapshot_source
+AS AUTO CDC ONCE INTO accounts_current
+FROM stream(accounts_snapshot_source)
 KEYS (account_id)
 SEQUENCE BY sequence_number
-STORED AS SCD TYPE 1
-EXCEPT (operation, sequence_number);
+COLUMNS * EXCEPT (operation, sequence_number)
+STORED AS SCD TYPE 1;
 
 -- Flow 1B: Continuous CDC Flow
 CREATE FLOW accounts_continuous_cdc
-AS AUTO CDC
-INTO accounts_current
-FROM accounts_cdc_source
+AS AUTO CDC INTO accounts_current
+FROM stream(accounts_cdc_source)
 KEYS (account_id)
+APPLY AS DELETE WHEN operation = 'DELETE'
 SEQUENCE BY sequence_number
-APPLY AS DELETES (operation = 'DELETE')
-STORED AS SCD TYPE 1
-EXCEPT (operation, sequence_number);
+COLUMNS * EXCEPT (operation, sequence_number)
+STORED AS SCD TYPE 1;
 
 
 -- ============================================================================
 -- 2. SUBSCRIPTIONS (SCD Type 1 Current-State + SCD Type 2 Historical Audit)
 -- ============================================================================
 CREATE OR REFRESH STREAMING TABLE subscriptions_current
-COMMENT 'Current-state subscriptions table managed by Lakeflow AUTO CDC';
+COMMENT 'Current-state subscriptions table managed by Lakeflow AUTO CDC'
+TBLPROPERTIES ("pipelines.cdc.tombstoneGCThresholdInSeconds" = "604800");
 
 -- Flow 2A: Initial Snapshot Hydration (once=true)
 CREATE FLOW subscriptions_initial_hydration
-AS AUTO CDC ONCE
-INTO subscriptions_current
-FROM subscriptions_snapshot_source
+AS AUTO CDC ONCE INTO subscriptions_current
+FROM stream(subscriptions_snapshot_source)
 KEYS (subscription_id)
 SEQUENCE BY sequence_number
-STORED AS SCD TYPE 1
-EXCEPT (operation, sequence_number);
+COLUMNS * EXCEPT (operation, sequence_number)
+STORED AS SCD TYPE 1;
 
 -- Flow 2B: Continuous CDC Flow
 CREATE FLOW subscriptions_continuous_cdc
-AS AUTO CDC
-INTO subscriptions_current
-FROM subscriptions_cdc_source
+AS AUTO CDC INTO subscriptions_current
+FROM stream(subscriptions_cdc_source)
 KEYS (subscription_id)
+APPLY AS DELETE WHEN operation = 'DELETE'
 SEQUENCE BY sequence_number
-APPLY AS DELETES (operation = 'DELETE')
-STORED AS SCD TYPE 1
-EXCEPT (operation, sequence_number);
+COLUMNS * EXCEPT (operation, sequence_number)
+STORED AS SCD TYPE 1;
 
 -- ----------------------------------------------------------------------------
 -- SCD Type 2 Target: subscriptions_history
 -- ----------------------------------------------------------------------------
 CREATE OR REFRESH STREAMING TABLE subscriptions_history
-COMMENT 'Historical audit SCD Type 2 subscriptions table managed by Lakeflow AUTO CDC';
+COMMENT 'Historical audit SCD Type 2 subscriptions table managed by Lakeflow AUTO CDC'
+TBLPROPERTIES ("pipelines.cdc.tombstoneGCThresholdInSeconds" = "604800");
 
 -- Flow 2C: History Initial Snapshot Hydration (once=true)
 CREATE FLOW subscriptions_history_initial_hydration
-AS AUTO CDC ONCE
-INTO subscriptions_history
-FROM subscriptions_snapshot_source
+AS AUTO CDC ONCE INTO subscriptions_history
+FROM stream(subscriptions_snapshot_source)
 KEYS (subscription_id)
 SEQUENCE BY sequence_number
+COLUMNS * EXCEPT (operation, sequence_number)
 STORED AS SCD TYPE 2
-TRACK (account_id, plan_name, billing_cycle, monthly_amount, status, start_date, end_date)
-EXCEPT (operation, sequence_number);
+TRACK HISTORY ON (
+  account_id,
+  plan_name,
+  billing_cycle,
+  monthly_amount,
+  status,
+  start_date,
+  end_date
+);
 
 -- Flow 2D: History Continuous CDC Flow
 CREATE FLOW subscriptions_history_continuous_cdc
-AS AUTO CDC
-INTO subscriptions_history
-FROM subscriptions_cdc_source
+AS AUTO CDC INTO subscriptions_history
+FROM stream(subscriptions_cdc_source)
 KEYS (subscription_id)
+APPLY AS DELETE WHEN operation = 'DELETE'
 SEQUENCE BY sequence_number
-APPLY AS DELETES (operation = 'DELETE')
+COLUMNS * EXCEPT (operation, sequence_number)
 STORED AS SCD TYPE 2
-TRACK (account_id, plan_name, billing_cycle, monthly_amount, status, start_date, end_date)
-EXCEPT (operation, sequence_number);
+TRACK HISTORY ON (
+  account_id,
+  plan_name,
+  billing_cycle,
+  monthly_amount,
+  status,
+  start_date,
+  end_date
+);
 
 
 -- ============================================================================
 -- 3. INVOICES (SCD Type 1 Current-State)
 -- ============================================================================
 CREATE OR REFRESH STREAMING TABLE invoices_current
-COMMENT 'Current-state invoices table managed by Lakeflow AUTO CDC';
+COMMENT 'Current-state invoices table managed by Lakeflow AUTO CDC'
+TBLPROPERTIES ("pipelines.cdc.tombstoneGCThresholdInSeconds" = "604800");
 
 -- Flow 3A: Initial Snapshot Hydration (once=true)
 CREATE FLOW invoices_initial_hydration
-AS AUTO CDC ONCE
-INTO invoices_current
-FROM invoices_snapshot_source
+AS AUTO CDC ONCE INTO invoices_current
+FROM stream(invoices_snapshot_source)
 KEYS (invoice_id)
 SEQUENCE BY sequence_number
-STORED AS SCD TYPE 1
-EXCEPT (operation, sequence_number);
+COLUMNS * EXCEPT (operation, sequence_number)
+STORED AS SCD TYPE 1;
 
 -- Flow 3B: Continuous CDC Flow
 CREATE FLOW invoices_continuous_cdc
-AS AUTO CDC
-INTO invoices_current
-FROM invoices_cdc_source
+AS AUTO CDC INTO invoices_current
+FROM stream(invoices_cdc_source)
 KEYS (invoice_id)
+APPLY AS DELETE WHEN operation = 'DELETE'
 SEQUENCE BY sequence_number
-APPLY AS DELETES (operation = 'DELETE')
-STORED AS SCD TYPE 1
-EXCEPT (operation, sequence_number);
+COLUMNS * EXCEPT (operation, sequence_number)
+STORED AS SCD TYPE 1;
 
 
 -- ============================================================================
 -- 4. PAYMENTS (SCD Type 1 Current-State)
 -- ============================================================================
 CREATE OR REFRESH STREAMING TABLE payments_current
-COMMENT 'Current-state payments table managed by Lakeflow AUTO CDC';
+COMMENT 'Current-state payments table managed by Lakeflow AUTO CDC'
+TBLPROPERTIES ("pipelines.cdc.tombstoneGCThresholdInSeconds" = "604800");
 
 -- Flow 4A: Initial Snapshot Hydration (once=true)
 CREATE FLOW payments_initial_hydration
-AS AUTO CDC ONCE
-INTO payments_current
-FROM payments_snapshot_source
+AS AUTO CDC ONCE INTO payments_current
+FROM stream(payments_snapshot_source)
 KEYS (payment_id)
 SEQUENCE BY sequence_number
-STORED AS SCD TYPE 1
-EXCEPT (operation, sequence_number);
+COLUMNS * EXCEPT (operation, sequence_number)
+STORED AS SCD TYPE 1;
 
 -- Flow 4B: Continuous CDC Flow
 CREATE FLOW payments_continuous_cdc
-AS AUTO CDC
-INTO payments_current
-FROM payments_cdc_source
+AS AUTO CDC INTO payments_current
+FROM stream(payments_cdc_source)
 KEYS (payment_id)
+APPLY AS DELETE WHEN operation = 'DELETE'
 SEQUENCE BY sequence_number
-APPLY AS DELETES (operation = 'DELETE')
-STORED AS SCD TYPE 1
-EXCEPT (operation, sequence_number);
+COLUMNS * EXCEPT (operation, sequence_number)
+STORED AS SCD TYPE 1;
