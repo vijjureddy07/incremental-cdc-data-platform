@@ -113,6 +113,8 @@ A robust CDC event contract provides complete auditability and downstream reconc
 - **Log Sequence Numbers (LSN)** or per-entity sequence counters provide a strict, monotonically increasing total order per business key.
 - Downstream merge engines must prioritize `sequence_number` over landing order or client timestamps:
 $$\text{State}(K) = \text{Payload}\left(\arg\max_{e \in \text{Events}(K)} e.\text{sequence\_number}\right)$$
+- **Strict Monotonicity Rule**: If an incoming event has a sequence number less than or equal to the highest applied sequence for that business key (`sequence_number <= current_max_sequence`), it is rejected as stale/non-monotonic.
+- **No Timestamp Tiebreaker**: `event_timestamp` must NEVER be used to pick a winner between conflicting equal-sequence records. A deterministic transactional pipeline treats duplicate or equal sequences as non-monotonic.
 
 ---
 

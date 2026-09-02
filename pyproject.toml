@@ -8,10 +8,10 @@ version = "0.1.0"
 description = "Deterministic Source System & CDC Simulator for Incremental Ingestion"
 readme = "README.md"
 requires-python = ">=3.11"
-license = { text = "MIT" }
+license = "MIT"
 authors = [{ name = "Portfolio Author" }]
 dependencies = [
-    "pyspark>=3.5.0",
+    "pyspark>=3.5.0,<3.6.0",
     "pyarrow>=14.0.0",
 ]
 
@@ -19,10 +19,12 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
     "ruff>=0.4.0",
+    "build>=1.0.0",
 ]
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["."]
+include = ["src*"]
 
 [tool.ruff]
 line-length = 100

@@ -1,6 +1,5 @@
 """Unit tests for CDC structural and semantic validator."""
 
-
 from src.cdc.models import CDCEvent
 from src.cdc.validator import CDCValidator
 
@@ -102,19 +101,38 @@ def test_validator_rejection_missing_business_key():
     assert any("business_key" in err.lower() for err in result.errors)
 
 
-def test_validator_rejection_missing_or_negative_sequence():
-    """Verify rejection when sequence_number is non-positive or missing."""
+def test_validator_rejection_negative_sequence():
+    """Verify rejection when sequence_number is negative."""
     raw_ev = {
         "event_id": "evt_bad_seq",
         "table_name": "invoices",
         "operation": "UPDATE",
         "business_key": {"invoice_id": "INV-0001"},
-        "sequence_number": -1,
+        "sequence_number": -5,
         "event_timestamp": "2026-04-01T10:00:00Z",
         "source_commit_timestamp": "2026-04-01T10:00:01Z",
         "batch_id": "batch_001",
         "payload": {"invoice_id": "INV-0001", "invoice_status": "PAID"},
         "before_payload": {"invoice_id": "INV-0001", "invoice_status": "ISSUED"},
+        "source_system": "b2b_saas_postgres",
+    }
+    result = CDCValidator.validate(raw_ev)
+    assert not result.is_valid
+    assert any("sequence_number" in err.lower() for err in result.errors)
+
+
+def test_validator_rejection_missing_sequence_key():
+    """Verify rejection when sequence_number is completely omitted from the payload dictionary."""
+    raw_ev = {
+        "event_id": "evt_missing_seq",
+        "table_name": "accounts",
+        "operation": "INSERT",
+        "business_key": {"account_id": "ACC-9998"},
+        "event_timestamp": "2026-04-01T10:00:00Z",
+        "source_commit_timestamp": "2026-04-01T10:00:01Z",
+        "batch_id": "batch_001",
+        "payload": {"account_id": "ACC-9998", "account_name": "No Seq Co"},
+        "before_payload": None,
         "source_system": "b2b_saas_postgres",
     }
     result = CDCValidator.validate(raw_ev)

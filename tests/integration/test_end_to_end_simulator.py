@@ -84,10 +84,10 @@ def test_full_simulation_lifecycle():
         assert acc_41 is not None
         assert acc_41["account_name"] == "Apex Cloud Analytics"
 
-        # 2. ACC-0001 status changed to SUSPENDED
+        # 2. ACC-0001 status changed to ACTIVE (from baseline SUSPENDED)
         acc_1 = engine.get_record("accounts", "ACC-0001")
         assert acc_1 is not None
-        assert acc_1["status"] == "SUSPENDED"
+        assert acc_1["status"] == "ACTIVE"
 
         # 3. SUB-0001 plan changed to ENTERPRISE with $1299.00
         sub_1 = engine.get_record("subscriptions", "SUB-0001")
@@ -95,10 +95,10 @@ def test_full_simulation_lifecycle():
         assert sub_1["plan_name"] == "ENTERPRISE"
         assert sub_1["monthly_amount"] == "1299.00"
 
-        # 4. INV-0001 status changed to PAID
+        # 4. INV-0001 status changed to VOID (from baseline PAID)
         inv_1 = engine.get_record("invoices", "INV-0001")
         assert inv_1 is not None
-        assert inv_1["invoice_status"] == "PAID"
+        assert inv_1["invoice_status"] == "VOID"
 
         # 5. PAY-0001 status changed to REFUNDED
         pay_1 = engine.get_record("payments", "PAY-0001")
@@ -112,8 +112,8 @@ def test_full_simulation_lifecycle():
         acc_2 = engine.get_record("accounts", "ACC-0002")
         assert acc_2 is not None
         assert acc_2["account_name"] == "Healthcare Solutions 2 Inc"
-        assert acc_2["status"] == "ACTIVE"
-        assert acc_2["country"] == "CA"
+        assert acc_2["status"] == "TRIAL"
+        assert acc_2["country"] == "GB"
 
         # 8. Late arrival state for SUB-0002
         sub_2 = engine.get_record("subscriptions", "SUB-0002")

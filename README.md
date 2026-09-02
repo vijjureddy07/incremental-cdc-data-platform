@@ -8,11 +8,11 @@ A production-grade, local-first engineering framework designed to demonstrate en
 
 Modern enterprise data platforms cannot afford full snapshot reloads for massive transactional tables. This repository provides a complete, robust reference implementation demonstrating:
 
-- **Deterministic Transactional Source Modeling**: Compact B2B SaaS subscription domain with referential integrity and explicit PySpark schemas.
+- **Deterministic Transactional Source Modeling**: Compact B2B SaaS subscription domain with referential integrity and explicit PySpark schemas (pinned to PySpark 3.5.x).
 - **High-Watermark Incremental Processing**: Fast, lightweight query-based incremental extraction using timestamps (`updated_at`).
-- **Change Data Capture (CDC) Event Streaming**: Granular transaction log replication capturing inserts, updates, and physical deletes with before and after images.
-- **Authoritative Event Sequencing**: Strict out-of-order and duplicate reconciliation using monotonically increasing sequence numbers.
-- **Golden Mutation Oracle**: In-memory transactional engine providing the exact ground truth for downstream lakehouse validation.
+- **Change Data Capture (CDC) Event Streaming**: Granular transaction log replication capturing inserts, updates, and physical deletes with before and after images derived directly from the actual source state.
+- **Authoritative Event Sequencing**: Strict out-of-order and duplicate reconciliation using monotonically increasing sequence numbers (strictly monotonic per business key without using `event_timestamp` as a tiebreaker).
+- **Golden Mutation Oracle**: In-memory transactional engine providing the exact ground truth for downstream lakehouse validation, with true deep-copy state isolation.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────────┐
@@ -110,7 +110,7 @@ The platform models a high-fidelity B2B SaaS subscription lifecycle:
 
 ## 4. CDC Event Model & Ordering Contract
 
-Every change event follows a strict, strongly typed contract:
+Every change event follows a strict, strongly typed contract derived directly from the source snapshot baseline:
 
 ```json
 {
@@ -124,29 +124,45 @@ Every change event follows a strict, strongly typed contract:
   "batch_id": "batch_001",
   "before_payload": {
     "subscription_id": "SUB-0001",
+    "account_id": "ACC-0001",
     "plan_name": "STARTER",
-    "monthly_amount": "49.00"
+    "billing_cycle": "ANNUAL",
+    "monthly_amount": "49.00",
+    "status": "PAUSED",
+    "start_date": "2026-03-06",
+    "end_date": null,
+    "created_at": "2026-03-06T00:00:00Z",
+    "updated_at": "2026-03-06T16:00:00Z"
   },
   "payload": {
     "subscription_id": "SUB-0001",
+    "account_id": "ACC-0001",
     "plan_name": "ENTERPRISE",
-    "monthly_amount": "1299.00"
+    "billing_cycle": "ANNUAL",
+    "monthly_amount": "1299.00",
+    "status": "PAUSED",
+    "start_date": "2026-03-06",
+    "end_date": null,
+    "created_at": "2026-03-06T00:00:00Z",
+    "updated_at": "2026-04-01T10:35:00Z"
   },
   "source_system": "b2b_saas_postgres"
 }
 ```
 
 ### Authoritative Sequencing: `sequence_number` vs `event_timestamp`
-- **`sequence_number`**: Monotonically increasing sequence assigned by the database transaction commit log (WAL LSN). **Authoritative for ordering**.
-- **`event_timestamp`**: Application event time. Subject to clock drift, server skew, and network retries. **Must NOT alone be trusted for state ordering**.
+- **`sequence_number`**: Monotonically increasing sequence assigned by the database transaction commit log (WAL LSN). **Strictly authoritative for ordering**. A change event with `sequence_number <= current_max_seq` is rejected as stale/non-monotonic.
+- **`event_timestamp`**: Application event time. Subject to clock drift, server skew, and network retries. **Never used as an authoritative tiebreaker** between conflicting sequence states.
 - **`source_commit_timestamp`**: Timestamp when the transaction committed to disk in the source database.
 - **`batch_id`**: Ingestion file chunking/partitioning grouping, **not** business ordering.
 
 ### Streaming Anomalies Handled Deterministically
-1. **Duplicate Events**: At-least-once delivery duplicates are filtered via `event_id` tracking and sequence checks.
-2. **Out-of-Order Delivery**: Sequence 102 arriving before Sequence 101 is resolved by evaluating sequence precedence per business key.
-3. **Late-Arriving Events**: Historical events arriving in future batches are merged only if their sequence number exceeds current target state.
-4. **Invalid / Malformed Events**: Invalid operations, missing business keys, and negative sequence numbers are validated and routed to quarantine.
+1. **Source State Truth**: All `before_payload` images are derived directly from the actual deterministic source snapshot rather than hard-coded fictional values.
+2. **Field Preservation**: `payload` preserves all untouched source columns and modifies only business fields and `updated_at`.
+3. **Duplicate Events**: At-least-once delivery duplicates are filtered via `event_id` tracking and sequence checks.
+4. **Out-of-Order Delivery**: Tested both with pre-sorting and in raw arrival order (`sort_by_sequence=False`) where `seq 102` is accepted and `seq 101` is rejected as stale.
+5. **Late-Arriving Events**: Historical events arriving in future batches are merged only if their sequence number exceeds current target state.
+6. **Quarantine Fixtures**: Missing PK, missing sequence number, negative sequence, invalid operation (`TRUNCATE`), and missing delete before-image are validated and quarantined.
 
 ---
 
@@ -222,6 +238,12 @@ pytest -v
 
 ```bash
 ruff check .
+```
+
+### Build Wheel Package & Verify Isolated Installation
+
+```bash
+python -m build --wheel
 ```
 
 ---

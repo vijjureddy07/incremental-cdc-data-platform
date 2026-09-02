@@ -50,6 +50,7 @@ class SourceMutationEngine:
                 continue
             pk_col = TABLE_PRIMARY_KEYS[table_name]
             self._tables[table_name] = {}
+            self._entity_sequences[table_name] = {}
             for rec in records:
                 pk_val = str(rec[pk_col])
                 self._tables[table_name][pk_val] = deepcopy(rec)
@@ -67,7 +68,7 @@ class SourceMutationEngine:
         if not val_res.is_valid:
             return False
 
-        # 2. Duplicate event check
+        # 2. Duplicate event check (exact event_id deduplication)
         if cdc_event.event_id in self._seen_event_ids:
             return False
 
@@ -76,9 +77,9 @@ class SourceMutationEngine:
         pk_val = str(cdc_event.business_key[pk_col])
         current_max_seq = self._entity_sequences[table_name].get(pk_val, 0)
 
-        # 3. Sequence Ordering enforcement
-        if enforce_sequence and cdc_event.sequence_number < current_max_seq:
-            # Stale / out-of-order event arriving after a higher sequence has already been applied
+        # 3. Strict Sequence Monotonicity enforcement
+        # If sequence_number <= current_max_seq, event is non-monotonic / stale
+        if enforce_sequence and cdc_event.sequence_number <= current_max_seq:
             self._seen_event_ids.add(cdc_event.event_id)
             return False
 
@@ -111,6 +112,7 @@ class SourceMutationEngine:
         """Apply a batch of events with optional pre-sorting by authoritative sequence number.
 
         Sorting guarantees deterministic state convergence even when files arrive out of order.
+        When sort_by_sequence is False, events are applied in exact arrival order.
         """
         result = MutationResult()
 
@@ -120,13 +122,13 @@ class SourceMutationEngine:
         ]
 
         if sort_by_sequence:
-            # Sort by table_name, business_key string, sequence_number, event_timestamp
+            # Sort authoritatively by table_name, business_key string, sequence_number
+            # Do NOT sort by event_timestamp as tiebreaker
             event_objs.sort(
                 key=lambda ev: (
                     ev.table_name,
                     str(sorted(ev.business_key.items())),
                     ev.sequence_number,
-                    ev.event_timestamp,
                 )
             )
 
@@ -147,7 +149,8 @@ class SourceMutationEngine:
             pk_val = str(ev.business_key[pk_col])
             current_max_seq = self._entity_sequences[table_name].get(pk_val, 0)
 
-            if ev.sequence_number < current_max_seq:
+            # Strict Monotonicity: <= is rejected as stale
+            if ev.sequence_number <= current_max_seq:
                 result.stale_sequence_count += 1
                 self._seen_event_ids.add(ev.event_id)
                 continue
@@ -160,19 +163,20 @@ class SourceMutationEngine:
         return result
 
     def get_table_records(self, table_name: str) -> list[dict[str, Any]]:
-        """Return list of records currently in the specified table."""
+        """Return deep copy list of records currently in the specified table."""
         if table_name not in self._tables:
             raise KeyError(f"Table '{table_name}' does not exist.")
-        return list(self._tables[table_name].values())
+        return [deepcopy(r) for r in self._tables[table_name].values()]
 
     def get_record(self, table_name: str, pk_val: str) -> dict[str, Any] | None:
-        """Retrieve a specific record by primary key."""
-        return self._tables.get(table_name, {}).get(str(pk_val))
+        """Retrieve a deep copy of a specific record by primary key."""
+        rec = self._tables.get(table_name, {}).get(str(pk_val))
+        return deepcopy(rec) if rec is not None else None
 
     def get_snapshot_state(self) -> dict[str, list[dict[str, Any]]]:
-        """Return a deep copy of the current state of all tables."""
+        """Return an actual deep copy of the current state of all tables."""
         return {
-            table: list(records.values())
+            table: [deepcopy(r) for r in records.values()]
             for table, records in self._tables.items()
         }
 
