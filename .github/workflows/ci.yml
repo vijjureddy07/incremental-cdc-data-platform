@@ -48,10 +48,21 @@ jobs:
 
       - name: Isolated Wheel Smoke Verification
         run: |
-          python -m venv smoke_env
-          smoke_env/bin/pip install --upgrade pip
-          smoke_env/bin/pip install dist/*.whl
-          smoke_env/bin/python -c "
+          SMOKE_VENV="${RUNNER_TEMP:-/tmp}/smoke_env"
+          rm -rf "$SMOKE_VENV"
+          python -m venv "$SMOKE_VENV"
+          "$SMOKE_VENV/bin/pip" install --upgrade pip
+          "$SMOKE_VENV/bin/pip" install dist/*.whl
+          SMOKE_DIR="$(mktemp -d)"
+          cd "$SMOKE_DIR"
+          "$SMOKE_VENV/bin/python" -P -c "
+          import os
+          import sys
+          from pathlib import Path
+
+          repo = Path(os.environ['GITHUB_WORKSPACE']).resolve()
+          venv = Path(sys.prefix).resolve()
+
           import src
           import src.source
           import src.cdc
@@ -59,5 +70,23 @@ jobs:
           import src.normalization
           import src.merge
           import src.cdf
-          print('Successfully imported all src modules from isolated wheel build!')
+
+          modules = [
+              src,
+              src.source,
+              src.cdc,
+              src.watermark,
+              src.normalization,
+              src.merge,
+              src.cdf,
+          ]
+
+          for module in modules:
+              module_path = Path(module.__file__).resolve()
+              print(f'Verified {module.__name__} loaded from: {module_path}')
+              assert repo not in module_path.parents, f'{module.__name__} was loaded from repository: {module_path}'
+              assert venv in module_path.parents, f'{module.__name__} was not loaded from smoke venv: {module_path}'
+
+          print('Successfully verified all src modules loaded from isolated wheel site-packages!')
           "
+          rm -rf "$SMOKE_VENV" "$SMOKE_DIR"

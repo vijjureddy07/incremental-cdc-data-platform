@@ -6,10 +6,10 @@ resources:
       catalog: ${var.catalog}
       schema: ${var.schema}
       serverless: true
-      root_path: .
+      root_path: ..
       libraries:
         - glob:
-            include: databricks/lakeflow/**
+            include: ../databricks/lakeflow/pipeline.py
       configuration:
         lakeflow.catalog: ${var.catalog}
         lakeflow.schema: ${var.schema}

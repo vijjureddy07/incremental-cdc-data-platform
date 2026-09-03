@@ -218,7 +218,7 @@ In contemporary Databricks environments, an alternative to per-table legacy CDF 
 Declarative Automation Bundles (formerly Databricks Asset Bundles) manage deployment of the frozen Module 5 Lakeflow AUTO CDC pipeline:
 - **Root Configuration**: [databricks.yml](../databricks.yml) defines bundle name, include paths, variables (`catalog`, `schema`), wheel artifacts, and environments (`dev` and `prod`).
 - **Resource Definition**: [resources/lakeflow.pipeline.yml](../resources/lakeflow.pipeline.yml) defines the serverless Lakeflow Declarative Pipeline with modern `schema:` syntax and synchronized `src/**` project source files.
-- **Python Import Isolation**: Synchronizes `src/**` and configures `root_path: .` so `src.source.schemas` resolves naturally without pip-installing local PySpark/Delta packages into the Databricks serverless runtime.
+- **Python Import Isolation**: Synchronizes `src/**` and configures `root_path: ..` (relative to `resources/lakeflow.pipeline.yml`) so the repository root and `src.source.schemas` resolve naturally without pip-installing local PySpark/Delta packages into the Databricks serverless runtime.
 
 ### Secretless GitHub OIDC Deployment (`.github/workflows/databricks-deploy.yml`)
 - **Trigger**: `workflow_dispatch` manual trigger only (default target: `dev`).

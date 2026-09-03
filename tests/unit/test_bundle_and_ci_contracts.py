@@ -41,7 +41,7 @@ def test_databricks_bundle_yaml_contract():
 
 
 def test_lakeflow_pipeline_resource_contract():
-    """Verify resources/lakeflow.pipeline.yml configuration."""
+    """Verify resources/lakeflow.pipeline.yml configuration, relative paths, and single-source entry."""
     resource_path = Path("resources/lakeflow.pipeline.yml")
     assert resource_path.exists(), "resources/lakeflow.pipeline.yml missing"
 
@@ -56,14 +56,41 @@ def test_lakeflow_pipeline_resource_contract():
     assert "schema" in pipeline
     assert "target" not in pipeline
 
-    # Libraries include Lakeflow definitions
+    # Relative root_path resolution relative to resources/ directory
+    resource_file = resource_path.resolve()
+    resource_dir = resource_file.parent
+    repo_root = Path(".").resolve()
+
+    assert pipeline.get("root_path") == "..", "root_path must be '..' relative to resources/"
+    assert (resource_dir / pipeline["root_path"]).resolve() == repo_root
+
+    # Libraries: exactly one source entry pointing to pipeline.py
+    libraries = pipeline.get("libraries", [])
+    assert len(libraries) == 1, f"Expected exactly one library entry, found {len(libraries)}"
+    assert "glob" in libraries[0] and "include" in libraries[0]["glob"]
+
+    include_path_str = libraries[0]["glob"]["include"]
+    resolved_pipeline_py = (resource_dir / include_path_str).resolve()
+    expected_pipeline_py = (repo_root / "databricks/lakeflow/pipeline.py").resolve()
+
+    assert resolved_pipeline_py.exists(), f"Resolved pipeline source {resolved_pipeline_py} does not exist"
+    assert resolved_pipeline_py == expected_pipeline_py, (
+        f"Pipeline source resolved to {resolved_pipeline_py}, expected {expected_pipeline_py}"
+    )
+
+    # Reject broad directory globs and ensure SQL reference is not an executable source
     raw_text = resource_path.read_text(encoding="utf-8")
-    assert "databricks/lakeflow/**" in raw_text
-    assert "pipelines.cdc.tombstoneGCThresholdInSeconds" in raw_text
+    assert "databricks/lakeflow/**" not in raw_text, "Broad glob 'databricks/lakeflow/**' is prohibited"
+    assert "../databricks/lakeflow/**" not in raw_text, "Broad glob '../databricks/lakeflow/**' is prohibited"
+    assert "auto_cdc_reference.sql" not in raw_text, "SQL reference must not be included as pipeline source"
+
+    # Configuration assertions
+    assert "configuration" in pipeline
+    assert pipeline["configuration"].get("pipelines.cdc.tombstoneGCThresholdInSeconds") == "604800"
 
 
 def test_ci_workflow_contract():
-    """Verify .github/workflows/ci.yml triggers and test/build steps."""
+    """Verify .github/workflows/ci.yml triggers, build steps, and true wheel-import isolation."""
     ci_path = Path(".github/workflows/ci.yml")
     assert ci_path.exists(), "ci.yml missing"
 
@@ -86,6 +113,13 @@ def test_ci_workflow_contract():
     assert "ruff check ." in raw_text
     assert "python -m build --wheel" in raw_text
     assert "dist/*.whl" in raw_text
+
+    # Real isolation assertions
+    assert "mktemp -d" in raw_text, "Smoke test must create temporary directory outside repo"
+    assert 'cd "$SMOKE_DIR"' in raw_text, "Smoke test must cd into temporary directory"
+    assert "-P" in raw_text, "Smoke test must invoke python with -P safe-path option"
+    assert "repo not in module_path.parents" in raw_text, "Smoke test must verify modules are not from repo checkout"
+    assert "venv in module_path.parents" in raw_text, "Smoke test must verify modules are loaded from smoke venv"
 
     # No secrets or cloud credentials required
     assert "secrets." not in raw_text
