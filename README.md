@@ -1,6 +1,6 @@
 # Incremental & CDC Data Platform
 
-A production-grade, local-first engineering framework designed to demonstrate end-to-end **Incremental Data Ingestion**, **Watermark Processing**, **Change Data Capture (CDC)**, **Sequence Ordering**, **Delta Lake MERGE**, and **Deterministic Lakehouse State Reconciliation**.
+A production-grade, local-first engineering framework designed to demonstrate end-to-end **Incremental Data Ingestion**, **Watermark Processing**, **Change Data Capture (CDC)**, **Sequence Ordering**, **Delta Lake MERGE**, **Databricks Lakeflow AUTO CDC**, **Delta Change Data Feed (CDF)**, and **Deterministic Lakehouse State Reconciliation**.
 
 ---
 
@@ -14,9 +14,11 @@ Modern enterprise data platforms cannot afford full snapshot reloads for massive
 - **Change Data Capture (CDC) Event Streaming**: Granular transaction log replication capturing inserts, updates, and physical deletes with before and after images derived directly from the actual source state.
 - **Authoritative Event Sequencing & Normalization**: PySpark window-based deduplication, conflicting duplicate event quarantine, out-of-order sequence normalization, equal-sequence collision quarantine, and dead-letter routing.
 - **Delta Lake MERGE & Recovery Engine**: ACID current-state target tables with two-phase applied event ledger, stale resurrection protection, sequence wave grouping with ambiguity checks, HARD/SOFT delete policies, and crash recovery.
-- **Golden Mutation Oracle**: In-memory transactional engine providing the exact ground truth for downstream lakehouse validation, with true deep-copy state isolation and field-by-field reconciliation.
+- **Databricks Lakeflow Declarative Pipelines & AUTO CDC**: Cloud-native managed CDC ingestion with streaming tables, initial hydration flows (`once=True`), continuous CDC flows, managed tombstones, and SCD Type 2 history tracking.
+- **Delta Change Data Feed & Downstream Audit Archive**: Downstream change feed consumption over Delta current-state tables with SQLite checkpointing, multi-table state isolation, deterministic SHA-256 `_change_id`, update pre/postimages, and idempotent MERGE archiving.
+- **Engineering Quality & CI/CD**: Real GitHub Actions CI workflow, Databricks Declarative Automation Bundles, secretless GitHub OIDC deployment, and isolated wheel verification.
 
-```
+```text
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
 │                                     SOURCE LAYER                                       │
 │                                                                                        │
@@ -45,62 +47,57 @@ Modern enterprise data platforms cannot afford full snapshot reloads for massive
            │                               ┌─────────────────────────────┐┌─────────────────────────────┐
            │                               │    data/normalized_cdc/     ││      data/quarantine/       │
            │                               │processing_id=P/accept.jsonl ││processing_id=P/quarant.jsonl│
-           │                               └──────────────┬──────────────┘└─────────────────────────────┘
-           │                                              │
-           │                                              ▼
-           │                               ┌─────────────────────────────┐
-           │                               │      DeltaMergePipeline     │
-           │                               │   (Two-Phase MERGE Engine)  │
-           │                               └──────┬───────────────┬──────┘
-           │                                      │               │
-           │                                      ▼               ▼
-           │                       ┌────────────────────┐ ┌─────────────────────────────┐
-           │                       │ data/delta/current │ │ data/delta/control/ledger   │
-           │                       │ (ACID Targets)     │ │ (PENDING -> APPLIED states) │
-           │                       └──────────┬─────────┘ └─────────────────────────────┘
-           │                                  │
-           └──────────────────────────────────┼─────────────────────────┐
-                                              │                         │
-                                              ▼                         ▼
-                               ┌──────────────────────────────────────────────┐
-                               │           Source Mutation Engine             │
-                               │        (Golden Reconciliation Oracle)        │
-                               └──────────────────────────────────────────────┘
+           │                               └───────┬──────────────┬──────┘└─────────────────────────────┘
+           │                                       │              │
+           │                                       │              └─────────────────────────────┐
+           │                                       ▼                                            ▼
+           │                        ┌─────────────────────────────┐              ┌─────────────────────────────┐
+           │                        │      DeltaMergePipeline     │              │      Databricks Lakeflow    │
+           │                        │   (Two-Phase MERGE Engine)  │              │     AUTO CDC (Declarative)  │
+           │                        └──────┬───────────────┬──────┘              └──────────────┬──────────────┘
+           │                               │               │                                    │
+           │                               ▼               ▼                                    ▼
+           │                ┌────────────────────┐ ┌─────────────────────────────┐ ┌─────────────────────────────┐
+           │                │ data/delta/current │ │ data/delta/control/ledger   │ │ Managed Streaming Tables    │
+           │                │ (ACID Targets)     │ │ (PENDING -> APPLIED states) │ │ (accounts, subs_history)    │
+           │                └──────────┬─────────┘ └─────────────────────────────┘ └─────────────────────────────┘
+           │                           │
+           │                           ▼
+           │            ┌──────────────────────────────────────────────┐
+           │            │       Delta Change Data Feed (CDF)           │
+           │            │      (delta.enableChangeDataFeed = true)     │
+           │            └──────────────────────┬───────────────────────┘
+           │                                   │
+           │                                   ▼
+           │            ┌──────────────────────────────────────────────┐
+           │            │    CDFDownstreamPipeline & SQLite Control    │
+           │            │      (Deterministic SHA-256 _change_id)      │
+           │            └──────────────────────┬───────────────────────┘
+           │                                   │
+           │                                   ▼
+           │            ┌──────────────────────────────────────────────┐
+           │            │        Permanent Delta CDF Archive           │
+           │            │   (data/delta/downstream/cdf_archive/*)      │
+           │            └──────────────────────────────────────────────┘
+           │                                   │
+           └───────────────────────────────────┼─────────────────────────┐
+                                               │                         │
+                                               ▼                         ▼
+                                ┌──────────────────────────────────────────────┐
+                                │           Source Mutation Engine             │
+                                │        (Golden Reconciliation Oracle)        │
+                                └──────────────────────────────────────────────┘
 ```
 
 ---
 
 ## 2. Core Concepts & Engineering Foundations
 
-### Why Full Table Reloads Fail at Scale
-In a naive full reload approach, pipelines re-read and overwrite entire tables every cycle ($O(N)$ data transfer). As data grows into millions or billions of rows:
-1. **Source Database Strain**: High I/O and shared table locks degrade live application response times.
-2. **Network Saturation**: Transferring gigabytes of unchanged data exhausts bandwidth.
-3. **Exploding Batch Windows**: Ingestion duration expands linearly, causing pipelines to miss SLA targets.
-
-### Watermark vs. Change Data Capture (CDC)
-
-```
-                       ┌──────────────────────────────────────┐
-                       │       Incremental Ingestion          │
-                       └──────────────────┬───────────────────┘
-                                          │
-                  ┌───────────────────────┴───────────────────────┐
-                  ▼                                               ▼
-     ┌───────────────────────────┐                  ┌───────────────────────────┐
-     │    Watermark Ingestion    │                  │  Change Data Capture (CDC)│
-     ├───────────────────────────┤                  ├───────────────────────────┤
-     │ • WHERE updated_at > :t   │                  │ • WAL / Binlog Stream     │
-     │ • Periodic batch polling  │                  │ • Continuous / Near Real-T│
-     │ • Sees latest state only  │                  │ • Captures intermediate Δ │
-     │ • Cannot see hard deletes │                  │ • Captures hard deletes   │
-     └───────────────────────────┘                  └───────────────────────────┘
-```
-
-### The Physical Delete Blind Spot
-When a row is physically deleted from a source database (`DELETE FROM table WHERE id = 'XYZ'`), the record ceases to exist on storage pages. A subsequent high-watermark query (`WHERE updated_at > :last_watermark`) will **never see the deleted record**.
-
-Without a CDC replication stream emitting explicit `DELETE` events (or application-level soft-delete columns), the downstream target lakehouse retains stale deleted rows indefinitely.
+### Three Distinct CDC Concepts
+The platform distinguishes three separate layers of change processing:
+1. **Source CDC (Module 3)**: Ingestion, structural validation, event fingerprinting, out-of-order sequence normalization, and dead-letter quarantine from raw change streams.
+2. **Target CDC Application (Modules 4 & 5)**: Mutating current-state Delta tables exactly once with replay recovery, stale sequence protection, and delete propagation (imperatively via Delta MERGE in Module 4; declaratively via Lakeflow AUTO CDC in Module 5).
+3. **Downstream Change Feed (Module 6)**: Capturing row-level mutations emitted by target Delta tables via Delta Change Data Feed (CDF), deriving deterministic SHA-256 `_change_id`s, and storing permanent history in idempotent Delta archives.
 
 ---
 
@@ -114,105 +111,79 @@ $$\text{LOW} < (\text{updated\_at}, \text{primary\_key}) \le \text{HIGH}$$
 - **LOW (Exclusive)**: `(updated_at > low_ts) OR (updated_at = low_ts AND primary_key > low_key)`
 - **HIGH (Inclusive)**: `(updated_at < high_ts) OR (updated_at = high_ts AND primary_key <= high_key)`
 
-### Frozen High-Watermark Window & Durable Recovery
-To prevent mid-query transaction commits from corrupting extraction windows, the pipeline captures the current maximum source watermark (`HIGH`) before querying. If extraction or landing fails, the uncommitted window is persisted in `watermark_run_audit` and reused on retry—even if source tables mutate before the retry occurs.
-
 ---
 
 ## 4. CDC Normalization, Ordering & Quarantine Pipeline
 
 Module 3 transforms raw at-least-once CDC landing files into a trustworthy, authoritative stream using **PySpark DataFrames**:
-
-1. **Exact Duplicate Replay Deduplication**: If multiple records share `event_id` and the identical SHA-256 event fingerprint, a single deterministic representative is retained (`batch_id ASC`, `ingestion_batch_id ASC`, `source_file ASC`, `ingestion_order ASC`) and redundant deliveries are dropped (`exact_duplicates_dropped`).
-2. **Conflicting Duplicate Event ID Isolation**: If the same `event_id` appears with differing semantic payloads, all conflicting records are quarantined under `DUPLICATE_EVENT_CONFLICT`.
-3. **Authoritative Entity Sequence Normalization**: Events for an entity are ordered strictly by `sequence_number` (normalizing out-of-order arrivals 102→101 into 101→102).
-4. **Equal-Sequence Conflict Detection**: Multiple distinct events for the same entity sharing the same sequence number are quarantined under `SEQUENCE_CONFLICT`.
-5. **Ingestion-Context Late Arrival Classification**: Classifies late events strictly using ingestion history and timestamp boundaries (`event_timestamp < prior_batches_max_event_timestamp`) rather than name heuristics.
-6. **Portable Content-Addressed Processing ID**: Derives `processing_id` from logical file IDs (`batch_id=<id>/<file>`) and raw SHA-256 byte digests, ensuring identical IDs across machines and root paths.
-7. **Decoupled Execution Timestamps**: Volatile run timestamps (`normalized_at`, `quarantined_at`) are excluded from `accepted.jsonl` and `quarantine.jsonl`, guaranteeing byte-for-byte identical replay outputs.
-8. **Strict Primary Key Validation**: Enforces primary key presence and matching in all payload and before-image dictionaries.
-9. **Dead-Letter Quarantine Store**: Malformed JSON lines and invalid structural/semantic records are routed to `data/quarantine/processing_id=<id>/quarantine.jsonl`.
+1. Exact duplicate deduplication via SHA-256 event fingerprints.
+2. Conflicting duplicate event ID quarantine under `DUPLICATE_EVENT_CONFLICT`.
+3. Authoritative per-entity sequence ordering (normalizing out-of-order arrivals 102→101 into 101→102).
+4. Equal-sequence conflict detection and quarantine under `SEQUENCE_CONFLICT`.
+5. Portable content-addressed `processing_id` derived from raw byte digests.
+6. Decoupled execution timestamps guaranteeing byte-for-byte identical replay outputs.
 
 ---
 
 ## 5. Delta Lake MERGE, Delete Propagation & Recovery
 
 Module 4 applies canonical accepted CDC events into ACID-compliant Delta Lake current-state tables:
-
-1. **Target Store Layout**:
-   - `data/delta/current/{accounts, subscriptions, invoices, payments}`
-   - Embeds 8 operational metadata lineage columns: `_last_sequence_number`, `_last_event_id`, `_last_operation`, `_last_event_fingerprint`, `_last_source_commit_timestamp`, `_last_processing_id`, `_is_deleted`, `_deleted_at`.
-2. **Two-Phase Event Applied Ledger**:
-   - Stored in Delta format at `data/delta/control/event_apply_ledger`.
-   - Coordinates `PENDING` $\rightarrow$ `APPLIED` two-phase transactional groups.
-   - Prevents stale resurrection after physical hard delete by retaining the entity's maximum applied sequence indefinitely.
-3. **Deterministic Sequence Waves & Ambiguity Guard**:
-   - Actionable mutations are grouped into sequence waves `(table_name, sequence_number)` executed in ascending order.
-   - Ambiguity assertion ensures at most one event per primary key per wave before invoking Delta MERGE.
-4. **Mutation & Delete Policies**:
-   - **HARD Delete**: Uses Delta Lake `whenMatchedDelete()` to physically purge the row while preserving ledger sequence history.
-   - **SOFT Delete**: Uses `whenMatchedUpdate` to toggle `_is_deleted = true` and `_deleted_at = ts`; subsequent updates restore `_is_deleted = false`.
-5. **Crash Recovery Scenarios**:
-   - Crash after writing `PENDING` $\rightarrow$ automatically detected and resumed with idempotent target MERGE and transition to `APPLIED`.
-   - Crash after target MERGE before marking `APPLIED` $\rightarrow$ idempotently resumed without row duplication.
-   - Unresolved `PENDING` events block unrelated processing runs (`PendingRecoveryError`).
-   - Exact replay of already applied events results in zero target mutations and zero Delta version increments.
+1. Embeds 8 operational metadata lineage columns.
+2. Coordinates `PENDING` $\rightarrow$ `APPLIED` two-phase transactional groups using a Delta event ledger.
+3. Prevents stale resurrection after physical hard delete by retaining the entity's maximum applied sequence indefinitely.
+4. Groups actionable mutations into deterministic sequence waves with ambiguity guards.
+5. Implements HARD and SOFT delete policies with crash recovery.
 
 ---
 
 ## 6. Databricks Lakeflow AUTO CDC Architecture
 
-Module 5 provides the native, managed Databricks Lakeflow implementation using **Spark Declarative Pipelines**:
-
-1. **Declarative Streaming Tables & Flows**:
-   - Uses `from pyspark import pipelines as dp` with `dp.create_streaming_table(...)` and `dp.create_auto_cdc_flow(...)`.
-   - Replaces deprecated `import dlt` and legacy `apply_changes(...)`.
-2. **Initial Snapshot Hydration (`once = True`)**:
-   - Initial snapshot data is loaded once into the streaming tables using deterministic baseline sequence `sequence_number = 0`.
-3. **Continuous AUTO CDC & Authoritative Sequencing**:
-   - Evaluates ongoing change records ordered authoritatively by `sequence_number` (Long).
-   - Deletions applied via `apply_as_deletes = expr("operation = 'DELETE'")`.
-   - Excludes CDC control fields (`operation`, `sequence_number`) from final business target tables.
-4. **SCD Type 1 & SCD Type 2 Targets**:
-   - 4 Current-state SCD Type 1 targets: `accounts_current`, `subscriptions_current`, `invoices_current`, `payments_current`.
-   - 1 Historical audit SCD Type 2 target: `subscriptions_history`, tracking business modifications across all 7 subscription attributes with Lakeflow-managed `__START_AT` and `__END_AT` columns.
-5. **Managed Tombstones & GC Tuning**:
-   - Managed tombstones (`pipelines.cdc.tombstoneGCThresholdInSeconds = 604800`) prevent out-of-order delete resurrecting stale records.
-6. **SQL Reference Implementation**:
-   - [auto_cdc_reference.sql](file:///Users/vijjureddy/Job%20Switch%20Projects/Incremental%20&%20CDC%20Data%20Pipeline/databricks/lakeflow/sql/auto_cdc_reference.sql) provides equivalent declarative SQL using `CREATE FLOW ... AS AUTO CDC`.
+Module 5 provides the native, managed Databricks Lakeflow implementation:
+1. Declarative streaming tables and AUTO CDC flows using modern `pyspark.pipelines`.
+2. Initial snapshot hydration flows (`once=True`) with baseline `sequence_number = 0`.
+3. Continuous AUTO CDC flows with native delete application (`apply_as_deletes`).
+4. Aligned source schema contracts derived from authoritative frozen table schemas.
+5. SCD Type 2 history tracking on `subscriptions_history`.
+6. Managed tombstones (`pipelines.cdc.tombstoneGCThresholdInSeconds = 604800`) preventing out-of-order delete resurrection.
 
 ---
 
-## 7. Business Domain & Data Contracts
+## 7. Delta Change Data Feed & Downstream Archive
 
-The platform models a high-fidelity B2B SaaS subscription lifecycle:
-
-```
-[accounts] (account_id)
-   │ 1:N
-   ▼
-[subscriptions] (subscription_id, account_id)
-   │ 1:N
-   ▼
-[invoices] (invoice_id, subscription_id)
-   │ 1:N
-   ▼
-[payments] (payment_id, invoice_id)
-```
-
-### Table Schemas
-1. **`accounts`**: `account_id` (PK), `account_name`, `industry`, `country`, `status`, `created_at`, `updated_at`.
-2. **`subscriptions`**: `subscription_id` (PK), `account_id` (FK), `plan_name`, `billing_cycle`, `monthly_amount` (Decimal), `status`, `start_date`, `end_date`, `created_at`, `updated_at`.
-3. **`invoices`**: `invoice_id` (PK), `subscription_id` (FK), `invoice_date`, `due_date`, `invoice_amount` (Decimal), `invoice_status`, `created_at`, `updated_at`.
-4. **`payments`**: `payment_id` (PK), `invoice_id` (FK), `payment_date`, `payment_amount` (Decimal), `payment_method`, `payment_status`, `created_at`, `updated_at`.
+Module 6 establishes a restartable downstream change consumer and permanent audit archive:
+1. **Delta CDF Reader**: Bounded version range reader consuming `[start_version, end_version]` with canonical metadata validation (`_change_type`, `_commit_version`, `_commit_timestamp`).
+2. **Consumer State Store**: Dedicated SQLite store (`data/control/cdf_consumer.db`) with strict multi-table checkpoint isolation.
+3. **Deterministic SHA-256 `_change_id`**: Derived from table name, commit version, change type, primary key, and sorted row values.
+4. **Permanent Delta Archive**: Durable storage (`data/delta/downstream/cdf_archive/*`) updated via idempotent Delta MERGE.
+5. **Crash Recovery**: Checkpoint advances strictly after archive write; crash before checkpoint recovers cleanly without duplicate rows.
 
 ---
 
-## 8. Repository Structure
+## 8. CI/CD & Declarative Automation Bundles
+
+1. **GitHub Actions CI (`.github/workflows/ci.yml`)**:
+   - Automated quality gate running on Ubuntu, Python 3.11, Java 17 Temurin.
+   - Executes Pytest, Ruff linting, wheel packaging, and isolated wheel smoke verification.
+2. **Databricks Declarative Automation Bundles (`databricks.yml`)**:
+   - Manages deployment of the Lakeflow AUTO CDC pipeline with `dev` and `prod` targets.
+   - Serverless configuration with synchronized `src/**` project files.
+3. **Secretless GitHub OIDC Deployment (`.github/workflows/databricks-deploy.yml`)**:
+   - Manual `workflow_dispatch` trigger with `id-token: write` and `DATABRICKS_AUTH_TYPE: github-oidc`.
+   - Zero hardcoded credentials or tokens.
+
+---
+
+## 9. Repository Structure
 
 ```
 incremental-cdc-data-platform/
-├── .gitignore
+├── .github/
+│   └── workflows/
+│       ├── ci.yml                 # Real GitHub Actions CI workflow
+│       └── databricks-deploy.yml  # Secretless OIDC Databricks deploy workflow
+├── databricks.yml                 # Declarative Automation Bundle root
+├── resources/
+│   └── lakeflow.pipeline.yml      # Lakeflow AUTO CDC pipeline resource definition
 ├── pyproject.toml
 ├── requirements.txt
 ├── requirements-dev.txt
@@ -223,94 +194,33 @@ incremental-cdc-data-platform/
 │   ├── 03_CDC_NORMALIZATION_ORDERING.md
 │   ├── 04_DELTA_MERGE_REPLAY_RECOVERY.md
 │   ├── 05_LAKEFLOW_AUTO_CDC.md
+│   ├── 06_CDF_CICD_FINAL_HARDENING.md
 │   └── PROGRESS.md
 ├── databricks/
 │   └── lakeflow/
-│       ├── __init__.py          # Lakeflow module exports
-│       ├── config.py            # Externalized deployment configuration
-│       ├── contracts.py         # TableCDCSpec definitions
-│       ├── pipeline.py          # Declarative Python pipeline & AUTO CDC flows
+│       ├── __init__.py
+│       ├── config.py
+│       ├── contracts.py
+│       ├── pipeline.py
 │       └── sql/
-│           └── auto_cdc_reference.sql # Declarative SQL reference implementation
+│           └── auto_cdc_reference.sql
 ├── src/
-│   ├── source/
-│   │   ├── schemas.py           # PySpark StructType & Dataclass contracts
-│   │   ├── generator.py         # Deterministic synthetic snapshot generator
-│   │   └── mutation_engine.py   # State mutation engine & reconciliation oracle
-│   ├── cdc/
-│   │   ├── models.py            # Canonical CDCEvent & CDCOperation contracts
-│   │   ├── validator.py         # Structural & semantic CDC validator
-│   │   ├── generator.py         # Deterministic multi-scenario change batches
-│   │   └── serialization.py     # Deterministic JSONL serialization & I/O
-│   ├── watermark/
-│   │   ├── models.py            # CompositeWatermark & audit domain models
-│   │   ├── control_store.py     # Durable SQLite control store & concurrency
-│   │   ├── source_adapter.py    # Bounded composite watermark extractor
-│   │   ├── landing.py           # Deterministic batch hashing & landing writer
-│   │   └── pipeline.py          # Transactional watermark orchestrator
-│   ├── normalization/
-│   │   ├── models.py            # NormalizedCDCEvent, QuarantinedEvent, metrics
-│   │   ├── schema.py            # PySpark StructType schemas
-│   │   ├── fingerprint.py       # Deterministic canonical keys & SHA-256 hashing
-│   │   ├── reader.py            # Fault-tolerant raw JSONL file reader
-│   │   ├── validator.py         # Structural & semantic validation rules
-│   │   ├── processor.py         # PySpark deduplication & sequence ordering engine
-│   │   ├── writer.py            # Atomic JSONL partition writers & readers
-│   │   └── pipeline.py          # End-to-end normalization orchestrator
-│   ├── merge/
-│   │   ├── models.py            # DeletePolicy, LedgerStatus, domain exceptions
-│   │   ├── target_store.py      # Delta target tables & snapshot initialization
-│   │   ├── event_ledger.py      # Delta control applied event ledger
-│   │   ├── event_adapter.py     # JSONL loader & typed DataFrame converter
-│   │   ├── merge_engine.py      # Delta Lake MERGE mutation engine
-│   │   ├── pipeline.py          # Two-phase transactional merge pipeline
-│   │   └── reconciliation.py    # Mutation oracle reconciliation engine
-│   └── utils/
-│       └── helpers.py           # Date, Decimal, and path utilities
-├── tests/
-│   ├── conftest.py
-│   ├── unit/
-│   │   ├── test_schemas.py
-│   │   ├── test_source_generator.py
-│   │   ├── test_cdc_models.py
-│   │   ├── test_cdc_validator.py
-│   │   ├── test_cdc_generator.py
-│   │   ├── test_mutation_engine.py
-│   │   ├── test_serialization.py
-│   │   ├── test_watermark_models.py
-│   │   ├── test_watermark_control_store.py
-│   │   ├── test_watermark_source_adapter.py
-│   │   ├── test_watermark_landing.py
-│   │   ├── test_normalization_fingerprint.py
-│   │   ├── test_normalization_validator.py
-│   │   ├── test_normalization_reader.py
-│   │   ├── test_normalization_processor.py
-│   │   ├── test_merge_target_store.py
-│   │   ├── test_merge_event_ledger.py
-│   │   ├── test_merge_adapter.py
-│   │   ├── test_merge_engine.py
-│   │   ├── test_lakeflow_contracts.py
-│   │   ├── test_lakeflow_pipeline.py
-│   │   └── test_lakeflow_projections.py
-│   └── integration/
-│       ├── test_end_to_end_simulator.py
-│       ├── test_watermark_pipeline.py
-│       ├── test_normalization_pipeline.py
-│       └── test_merge_pipeline.py
-└── data/
-    ├── source_snapshot/         # Local Parquet initial snapshots
-    ├── cdc_landing/             # Partitioned raw JSONL change streams
-    ├── watermark_landing/       # Partitioned incremental watermark landing
-    ├── normalized_cdc/          # Partitioned accepted normalized change streams
-    ├── quarantine/              # Partitioned dead-letter quarantine store
-    └── delta/                   # Delta Lake storage root
-        ├── current/             # Target current-state Delta tables
-        └── control/             # Control Delta tables (applied ledger)
+│   ├── source/                    # Module 1: Synthetic source & mutation engine
+│   ├── cdc/                       # Module 1: CDC generation & serialization
+│   ├── watermark/                 # Module 2: Watermark incremental extraction
+│   ├── normalization/             # Module 3: CDC normalization & quarantine
+│   ├── merge/                     # Module 4: Delta MERGE & recovery engine
+│   ├── cdf/                       # Module 6: Delta CDF reader, archive & pipeline
+│   └── utils/                     # Shared date, decimal, and path helpers
+└── tests/
+    ├── conftest.py
+    ├── unit/
+    └── integration/
 ```
 
 ---
 
-## 9. Quickstart & Verification
+## 10. Quickstart & Verification
 
 ### Local Environment Setup
 
@@ -324,7 +234,7 @@ pip install -r requirements-dev.txt
 pip install -e .
 ```
 
-### Run Full Test Suite (180 tests)
+### Run Full Test Suite (206 tests)
 
 ```bash
 pytest -v
@@ -344,19 +254,11 @@ python -m build --wheel
 
 ---
 
-## 10. Project Roadmap (Modules 1–6)
+## 11. Project Roadmap (Modules 1–6)
 
 - [x] **Module 1: Source System + Deterministic CDC Event Simulator** *(FROZEN / COMPLETE)*
-  - Synthetic B2B SaaS generator, Parquet initial snapshots, CDC event generator (Inserts, Updates, Deletes, Dups, Out-of-Order, Late, Quarantine), Structured Validator, In-memory Mutation Engine.
 - [x] **Module 2: Transactional Watermark Incremental Ingestion + Control Tables** *(FROZEN / COMPLETE)*
-  - Durable SQLite control tables, explicit SQL transactions, composite cursors `(updated_at, PK)`, bounded window extraction, durable recoverable window contract, optimistic concurrency versioning, failure recovery, physical delete blind-spot testing.
 - [x] **Module 3: CDC Normalization, Ordering, Dedupe & Quarantine** *(FROZEN / COMPLETE)*
-  - Raw JSONL ingestion, structural & semantic validation, PySpark window-based deduplication, duplicate-event conflict quarantine, authoritative entity sequence ordering, dead-letter quarantine store, replay determinism.
 - [x] **Module 4: Delta MERGE, Delete Propagation, Idempotent Replay & Recovery** *(FROZEN / COMPLETE)*
-  - Delta Lake current-state tables, two-phase applied event ledger, ACID Delta MERGE, hard/soft delete propagation, stale resurrection protection, crash recovery, exact replay idempotency, full mutation oracle reconciliation.
-- [x] **Module 5: Databricks Lakeflow AUTO CDC** *(COMPLETE / CLOUD VALIDATION PENDING)*
-  - Modern Lakeflow Declarative Pipeline definitions with native AUTO CDC constructs (`create_auto_cdc_flow`), SCD Type 1 current-state streaming tables, SCD Type 2 history tracking, initial hydration with `once=True`, SQL reference.
-- [ ] **Module 6: Delta Change Data Feed, CI/CD & Final Hardening**
-  - Downstream Gold layer consumption via Delta Change Data Feed (CDF), end-to-end reconciliation tests, automated quality gates.
-
-
+- [x] **Module 5: Databricks Lakeflow AUTO CDC** *(FROZEN / COMPLETE / CLOUD VALIDATION PENDING)*
+- [x] **Module 6: Delta Change Data Feed, Downstream Recovery, CI/CD & Final Hardening** *(COMPLETE / CLOUD DEPLOYMENT PENDING)*

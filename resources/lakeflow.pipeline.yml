@@ -1,0 +1,16 @@
+# Databricks Declarative Automation Bundle: Lakeflow AUTO CDC Pipeline Resource
+resources:
+  pipelines:
+    lakeflow_auto_cdc_pipeline:
+      name: lakeflow-auto-cdc-${bundle.target}
+      catalog: ${var.catalog}
+      schema: ${var.schema}
+      serverless: true
+      root_path: .
+      libraries:
+        - glob:
+            include: databricks/lakeflow/**
+      configuration:
+        lakeflow.catalog: ${var.catalog}
+        lakeflow.schema: ${var.schema}
+        pipelines.cdc.tombstoneGCThresholdInSeconds: "604800"

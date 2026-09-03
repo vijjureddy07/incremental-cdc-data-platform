@@ -89,3 +89,7 @@ spark-warehouse/
 metastore_db/
 derby.log
 .ivy2/
+
+# Databricks local bundle state & config
+.databricks/
+.databrickscfg

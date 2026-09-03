@@ -1,0 +1,40 @@
+# Databricks Declarative Automation Bundle configuration
+# (Formerly known as Databricks Asset Bundles)
+bundle:
+  name: incremental-cdc-data-platform
+
+include:
+  - resources/*.yml
+
+variables:
+  catalog:
+    description: Target Unity Catalog catalog name for declarative pipelines
+    default: main
+  schema:
+    description: Target Unity Catalog schema name for declarative pipelines
+    default: cdc_portfolio
+
+sync:
+  include:
+    - "src/**"
+    - "databricks/**"
+
+artifacts:
+  default:
+    type: whl
+    build: python -m build --wheel
+    path: .
+
+targets:
+  dev:
+    mode: development
+    default: true
+    variables:
+      catalog: main
+      schema: cdc_portfolio_dev
+
+  prod:
+    mode: production
+    variables:
+      catalog: main
+      schema: cdc_portfolio

@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test-and-validate:
+    name: Test, Lint & Wheel Verification
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Set up Java 17 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          java-version: "17"
+          distribution: "temurin"
+
+      - name: Install Project & Dev Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run Pytest Suite
+        run: |
+          pytest -v
+
+      - name: Run Ruff Linter
+        run: |
+          ruff check .
+
+      - name: Build Wheel Artifact
+        run: |
+          python -m build --wheel
+
+      - name: Isolated Wheel Smoke Verification
+        run: |
+          python -m venv smoke_env
+          smoke_env/bin/pip install --upgrade pip
+          smoke_env/bin/pip install dist/*.whl
+          smoke_env/bin/python -c "
+          import src
+          import src.source
+          import src.cdc
+          import src.watermark
+          import src.normalization
+          import src.merge
+          import src.cdf
+          print('Successfully imported all src modules from isolated wheel build!')
+          "
