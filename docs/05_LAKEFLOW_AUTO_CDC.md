@@ -9,13 +9,13 @@ While Module 4 built a custom, production-grade local application layer using ex
 ```mermaid
 flowchart TD
     subgraph UPSTREAM ["Upstream Data Contracts"]
-        SNAP["Module 1 Snapshot Parquet<br/>(Initial Baseline)"]
-        CDC["Module 3 Accepted JSONL<br/>(Normalized CDC Stream)"]
+        SNAP["Module 1 Snapshot Parquet<br/>data/source_snapshot/{table}/snapshot.parquet"]
+        CDC["Module 3 Accepted JSONL<br/>data/normalized_cdc/*/accepted.jsonl"]
     end
 
-    subgraph PROJECTIONS ["Lakeflow Source Projections"]
-        SNAP_SRC["Snapshot Hydration Datasets<br/>(sequence_number = 0, operation = 'SNAPSHOT')"]
-        CDC_SRC["Continuous CDC Datasets<br/>(Flattened Payload + Primary Key Coalesce)"]
+    subgraph PROJECTIONS ["Lakeflow Streaming Temporary Views"]
+        SNAP_SRC["Snapshot Hydration Views<br/>(@dp.temporary_view, cloudFiles Parquet,<br/>sequence_number = 0, typed NULL lineage)"]
+        CDC_SRC["Continuous CDC Views<br/>(@dp.temporary_view, cloudFiles JSON,<br/>explicit frozen-schema type casts)"]
     end
 
     subgraph LAKEFLOW_FLOWS ["Declarative AUTO CDC Flows"]
@@ -41,11 +41,11 @@ flowchart TD
     end
 
     subgraph TARGETS ["Managed Streaming Tables"]
-        T_ACC[("accounts_current<br/>(SCD Type 1)")]
-        T_SUB[("subscriptions_current<br/>(SCD Type 1)")]
-        T_SUB_HIST[("subscriptions_history<br/>(SCD Type 2 Tracked)")]
-        T_INV[("invoices_current<br/>(SCD Type 1)")]
-        T_PAY[("payments_current<br/>(SCD Type 1)")]
+        T_ACC[("accounts_current<br/>(SCD Type 1 + Tombstone GC)")]
+        T_SUB[("subscriptions_current<br/>(SCD Type 1 + Tombstone GC)")]
+        T_SUB_HIST[("subscriptions_history<br/>(SCD Type 2 Tracked + Tombstone GC)")]
+        T_INV[("invoices_current<br/>(SCD Type 1 + Tombstone GC)")]
+        T_PAY[("payments_current<br/>(SCD Type 1 + Tombstone GC)")]
     end
 
     SNAP --> SNAP_SRC
@@ -117,29 +117,51 @@ Module 5 adheres strictly to current Databricks Lakeflow Declarative Pipeline Py
 
 ---
 
-## 3. Upstream Ingestion Contracts & Source Projections
+## 3. Aligned Source Schemas & Streaming Temporary Views
 
-Lakeflow AUTO CDC consumes two upstream data assets established by earlier modules:
+Databricks Lakeflow requires that multiple AUTO CDC flows targeting the same streaming table share **compatible schemas and keys**. To guarantee strict schema alignment, Module 5 implements both source projections as streaming temporary views (`@dp.temporary_view`) derived directly from the authoritative frozen table schemas:
 
-1. **Initial Hydration Source**:
-   - Consumes the frozen Module 1 synthetic Parquet snapshot (`data/source_snapshot/{table}/snapshot.parquet`).
-   - Projects a deterministic baseline sequence: `sequence_number = 0` (Long) and `operation = 'SNAPSHOT'`.
-   - Never uses arbitrary wall-clock timestamps for baseline ordering.
-2. **Continuous CDC Source (Databricks Auto Loader)**:
-   - Consumes the frozen Module 3 accepted normalized CDC stream (`data/normalized_cdc/*/accepted.jsonl`).
-   - Uses Databricks Auto Loader (`cloudFiles`) with nested structured type inference:
+1. **Initial Hydration Source (`@dp.temporary_view`)**:
+   - Consumes the frozen Module 1 synthetic Parquet snapshot directory via Auto Loader:
+     ```python
+     spark.readStream.format("cloudFiles")
+     .option("cloudFiles.format", "parquet")
+     .option("cloudFiles.includeExistingFiles", "true")
+     .load(snapshot_directory)
+     ```
+   - Casts each business column according to the authoritative schema.
+   - Projects deterministic baseline values: `sequence_number = 0` (Long), `operation = 'SNAPSHOT'`.
+   - Projects typed NULL lineage placeholders:
+     ```python
+     latest_event_id = lit(None).cast("string")
+     latest_event_fingerprint = lit(None).cast("string")
+     latest_source_commit_timestamp = lit(None).cast("string")
+     ```
+2. **Continuous CDC Source (`@dp.temporary_view`)**:
+   - Consumes the frozen Module 3 accepted normalized CDC stream via Auto Loader:
      ```python
      spark.readStream.format("cloudFiles")
      .option("cloudFiles.format", "json")
      .option("cloudFiles.inferColumnTypes", "true")
+     .option("cloudFiles.includeExistingFiles", "true")
      .load(cdc_path)
      ```
-   - Auto Loader preserves nested struct fields (`payload`, `before_payload`, `business_key`) necessary for expression evaluation.
-   - Projects flat schema rows suitable for AUTO CDC:
-     - **Primary Key**: Preserved for all operations by coalescing `payload.<pk>`, `before_payload.<pk>`, and `business_key.<pk>`. This ensures DELETE events always supply a non-null primary key.
-     - **Business Fields**: Unnested from `payload`.
-     - **Control & Lineage**: `operation`, `sequence_number`, `latest_event_id`, `latest_event_fingerprint`, `latest_source_commit_timestamp`.
-     - **Non-null Invariant**: Explicitly filters `sequence_number IS NOT NULL AND <pk> IS NOT NULL`.
+   - Explicitly casts business fields from nested `payload` to the authoritative domain types (preserving `DecimalType(10, 2)` for currency, `DateType` for dates, `TimestampType` for timestamps).
+   - Preserves primary keys on `DELETE` by coalescing `payload.<pk>`, `before_payload.<pk>`, and `business_key.<pk>`.
+   - Projects CDC operational metadata: `operation`, `sequence_number`, `latest_event_id`, `latest_event_fingerprint`, `latest_source_commit_timestamp`.
+
+### Unified Source Schema Contract
+For every table, the snapshot temporary view and CDC temporary view expose the exact same column names and data types:
+
+| Column | Type | Snapshot Hydration Source | Continuous CDC Source |
+| :--- | :--- | :--- | :--- |
+| `<pk>` | Domain Type | Snapshot `<pk>` | Coalesced `<pk>` |
+| `<business_columns>` | Domain Types | Explicitly cast snapshot fields | Explicitly cast payload fields |
+| `operation` | `string` | `"SNAPSHOT"` | CDC operation (`INSERT`/`UPDATE`/`DELETE`) |
+| `sequence_number` | `long` | `0L` | CDC `sequence_number` |
+| `latest_event_id` | `string` | `NULL` | CDC `event_id` |
+| `latest_event_fingerprint` | `string` | `NULL` | CDC `event_fingerprint` |
+| `latest_source_commit_timestamp` | `string` | `NULL` | CDC `source_commit_timestamp` |
 
 ---
 
@@ -154,10 +176,10 @@ Four current-state target streaming tables are registered:
 ### Multi-Flow Target Pairing
 Every current-state table is targeted by exactly two distinct declarative AUTO CDC flows:
 1. **Initial Hydration Flow (`once = True`)**:
-   - Exclusively reads the snapshot source dataset once upon initial deployment.
+   - Exclusively reads the snapshot source view once upon initial deployment.
    - Populates the baseline state at `sequence_number = 0`.
 2. **Continuous CDC Flow**:
-   - Streams ongoing change records.
+   - Streams ongoing change records from the CDC source view.
    - Evaluates delete conditions via `apply_as_deletes = expr("operation = 'DELETE'")`.
    - Excludes CDC control fields (`operation`, `sequence_number`) from the final business target table schema via `except_column_list = ["operation", "sequence_number"]`.
 
@@ -241,6 +263,7 @@ In a distributed CDC pipeline, a `DELETE` event may arrive ahead of an earlier `
 | Dimension | Module 4 (Custom Engine) | Module 5 (Databricks Lakeflow AUTO CDC) |
 | :--- | :--- | :--- |
 | **Execution Paradigm** | Imperative Python / PySpark local MERGE pipeline | Declarative streaming tables and CDC flows (`create_auto_cdc_flow`) |
+| **Source Intermediate Views** | Custom JSONL / DataFrame adapters | Streaming temporary views (`@dp.temporary_view`) with Auto Loader |
 | **ACID Transaction Model** | Two-phase ledger protocol across separate Delta tables | Engine-managed ACID streaming table state |
 | **Sequence Ordering** | Deterministic sequence waves + in-memory grouping | Native sequence resolution via `sequence_by="sequence_number"` |
 | **Delete Handling** | Explicit `whenMatchedDelete()` + perpetual ledger sequence history | Native `apply_as_deletes` with internal managed tombstones |
@@ -269,10 +292,11 @@ Pipeline paths and catalog parameters are externalized through `LakeflowConfig` 
 
 ### Local Contract Verification (Passed)
 - **Syntax & AST Compilation**: [pipeline.py](../databricks/lakeflow/pipeline.py) compiles cleanly with zero syntax errors.
-- **Registration Harness**: Verified 5 streaming tables (4 SCD1, 1 SCD2) and 10 AUTO CDC flows (5 hydration `once=True`, 5 continuous) with configured tombstone properties.
-- **Projections**: Verified non-null sequence assertion, Auto Loader options (`cloudFiles`, `cloudFiles.inferColumnTypes`), and primary key preservation on deletes.
+- **Registration Harness**: Verified 5 streaming tables (4 SCD1, 1 SCD2), 10 AUTO CDC flows (5 hydration `once=True`, 5 continuous), and 8 temporary source views with configured tombstone properties.
+- **Schema Alignment**: Verified identical schemas between snapshot hydration and continuous CDC source views for all 4 tables.
+- **Auto Loader Options**: Verified `cloudFiles`, `cloudFiles.inferColumnTypes = true`, and `cloudFiles.includeExistingFiles = true`.
 - **SQL Reference**: Verified modern SQL syntax (`FROM stream(...)`, `APPLY AS DELETE WHEN`, `COLUMNS * EXCEPT`, `TRACK HISTORY ON`).
-- **API Guard**: Verified zero deprecated `apply_changes` or `APPLY CHANGES INTO` tokens in Module 5 files.
+- **API Guard**: Verified zero deprecated `apply_changes`, `APPLY CHANGES INTO`, or `@dlt.view` tokens in Module 5 files.
 - **Isolation**: Verified standard `src` package imports cleanly on local PySpark 3.5 without Databricks runtime.
 
 ### Status Boundary & Cloud Execution Honesty

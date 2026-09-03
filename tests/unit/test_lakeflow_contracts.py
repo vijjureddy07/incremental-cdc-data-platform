@@ -3,9 +3,24 @@
 from pathlib import Path
 
 import pytest
+from pyspark.sql.types import (
+    DateType,
+    DecimalType,
+    LongType,
+    StringType,
+    TimestampType,
+)
 
-from databricks.lakeflow.config import LakeflowConfig, build_snapshot_path
-from databricks.lakeflow.contracts import TABLE_CDC_SPECS
+from databricks.lakeflow.config import (
+    LakeflowConfig,
+    build_snapshot_directory,
+    build_snapshot_path,
+)
+from databricks.lakeflow.contracts import (
+    TABLE_CDC_SPECS,
+    expected_lakeflow_projection_schema,
+)
+from src.source.schemas import TABLE_SCHEMAS_MAP
 
 
 def test_lakeflow_config_defaults():
@@ -45,28 +60,61 @@ def test_lakeflow_config_dynamic_volume_paths(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("LAKEFLOW_NORMALIZED_CDC_PATH", raising=False)
 
     cfg = LakeflowConfig.from_env()
-    assert cfg.snapshot_base_path == "/Volumes/analytics_prod/subscription_pipeline/cdc_data/source_snapshot"
-    assert cfg.normalized_cdc_base_path == "/Volumes/analytics_prod/subscription_pipeline/cdc_data/normalized_cdc"
-
-
-def test_build_snapshot_path_matches_module1_layout():
-    """Verify build_snapshot_path resolves to {base_path}/{table_name}/snapshot.parquet matching Module 1."""
-    cfg = LakeflowConfig(snapshot_base_path="/Volumes/main/cdc/snapshots")
-    assert build_snapshot_path("accounts", cfg) == "/Volumes/main/cdc/snapshots/accounts/snapshot.parquet"
     assert (
-        build_snapshot_path("subscriptions", cfg) == "/Volumes/main/cdc/snapshots/subscriptions/snapshot.parquet"
+        cfg.snapshot_base_path
+        == "/Volumes/analytics_prod/subscription_pipeline/cdc_data/source_snapshot"
     )
-    assert build_snapshot_path("invoices", cfg) == "/Volumes/main/cdc/snapshots/invoices/snapshot.parquet"
-    assert build_snapshot_path("payments", cfg) == "/Volumes/main/cdc/snapshots/payments/snapshot.parquet"
+    assert (
+        cfg.normalized_cdc_base_path
+        == "/Volumes/analytics_prod/subscription_pipeline/cdc_data/normalized_cdc"
+    )
 
 
-def test_pipeline_uses_auto_loader_cloudfiles():
-    """Verify that pipeline.py uses Databricks Auto Loader (cloudFiles) with nested column inference."""
+def test_build_snapshot_directory_and_path_matches_module1_layout():
+    """Verify snapshot directory and file helpers match Module 1 directory layout."""
+    cfg = LakeflowConfig(snapshot_base_path="/Volumes/main/cdc/snapshots")
+    assert build_snapshot_directory("accounts", cfg) == "/Volumes/main/cdc/snapshots/accounts"
+    assert (
+        build_snapshot_path("accounts", cfg)
+        == "/Volumes/main/cdc/snapshots/accounts/snapshot.parquet"
+    )
+    assert (
+        build_snapshot_directory("subscriptions", cfg)
+        == "/Volumes/main/cdc/snapshots/subscriptions"
+    )
+    assert (
+        build_snapshot_path("subscriptions", cfg)
+        == "/Volumes/main/cdc/snapshots/subscriptions/snapshot.parquet"
+    )
+    assert build_snapshot_directory("invoices", cfg) == "/Volumes/main/cdc/snapshots/invoices"
+    assert (
+        build_snapshot_path("invoices", cfg)
+        == "/Volumes/main/cdc/snapshots/invoices/snapshot.parquet"
+    )
+    assert build_snapshot_directory("payments", cfg) == "/Volumes/main/cdc/snapshots/payments"
+    assert (
+        build_snapshot_path("payments", cfg)
+        == "/Volumes/main/cdc/snapshots/payments/snapshot.parquet"
+    )
+
+
+def test_pipeline_uses_temporary_view_and_auto_loader():
+    """Verify pipeline.py uses @dp.temporary_view and Auto Loader with includeExistingFiles."""
     pipeline_code = Path("databricks/lakeflow/pipeline.py").read_text(encoding="utf-8")
 
+    # Uses temporary_view for source projections
+    assert "@dp.temporary_view" in pipeline_code
+    assert "@dp.table(" not in pipeline_code
+
+    # Uses Auto Loader cloudFiles for both Parquet snapshots and JSON CDC
     assert '.format("cloudFiles")' in pipeline_code
+    assert '.option("cloudFiles.format", "parquet")' in pipeline_code
     assert '.option("cloudFiles.format", "json")' in pipeline_code
     assert '.option("cloudFiles.inferColumnTypes", "true")' in pipeline_code
+    assert '.option("cloudFiles.includeExistingFiles", "true")' in pipeline_code
+
+    # Does not use batch read.parquet
+    assert "read.parquet(" not in pipeline_code
     assert 'readStream.format("json")' not in pipeline_code
 
 
@@ -117,6 +165,51 @@ def test_table_cdc_specs_unique_target_names():
     }
 
 
+def test_all_flow_pairs_share_matching_primary_keys():
+    """Verify hydration and continuous flows for each table share identical primary keys."""
+    for table_name, spec in TABLE_CDC_SPECS.items():
+        assert spec.primary_key in TABLE_SCHEMAS_MAP[table_name].fieldNames()
+        assert spec.primary_key == spec.business_columns[0]
+
+
+def test_expected_lakeflow_projection_schemas_preserve_frozen_types():
+    """Verify expected_lakeflow_projection_schema produces aligned schemas preserving frozen data types."""
+    for table_name in ["accounts", "subscriptions", "invoices", "payments"]:
+        schema = expected_lakeflow_projection_schema(table_name)
+        field_dict = {f.name: f.dataType for f in schema.fields}
+
+        # Operational metadata fields present with correct types
+        assert isinstance(field_dict["operation"], StringType)
+        assert isinstance(field_dict["sequence_number"], LongType)
+        assert isinstance(field_dict["latest_event_id"], StringType)
+        assert isinstance(field_dict["latest_event_fingerprint"], StringType)
+        assert isinstance(field_dict["latest_source_commit_timestamp"], StringType)
+
+        # Timestamps preserved
+        assert isinstance(field_dict["created_at"], TimestampType)
+        assert isinstance(field_dict["updated_at"], TimestampType)
+
+    # Decimal & Date checks
+    sub_fields = {
+        f.name: f.dataType for f in expected_lakeflow_projection_schema("subscriptions").fields
+    }
+    assert isinstance(sub_fields["monthly_amount"], DecimalType)
+    assert isinstance(sub_fields["start_date"], DateType)
+
+    inv_fields = {
+        f.name: f.dataType for f in expected_lakeflow_projection_schema("invoices").fields
+    }
+    assert isinstance(inv_fields["invoice_amount"], DecimalType)
+    assert isinstance(inv_fields["invoice_date"], DateType)
+    assert isinstance(inv_fields["due_date"], DateType)
+
+    pay_fields = {
+        f.name: f.dataType for f in expected_lakeflow_projection_schema("payments").fields
+    }
+    assert isinstance(pay_fields["payment_amount"], DecimalType)
+    assert isinstance(pay_fields["payment_date"], DateType)
+
+
 def test_subscriptions_scd2_history_tracking_columns():
     """Verify subscriptions SCD Type 2 defines historical tracking across all business columns."""
     sub_spec = TABLE_CDC_SPECS["subscriptions"]
@@ -146,6 +239,7 @@ def test_no_deprecated_api_in_module5_files():
         "dlt.apply_changes",
         "apply_changes(",
         "APPLY CHANGES INTO",
+        "@dlt.view",
     ]
 
     files_to_check = [

@@ -4,6 +4,10 @@
 -- This SQL file demonstrates the declarative SQL equivalent of the Python
 -- Lakeflow pipeline using modern AUTO CDC syntax (CREATE FLOW ... AS AUTO CDC).
 --
+-- Note: The referenced snapshot and CDC source datasets
+-- (e.g. stream(accounts_snapshot_source) and stream(accounts_cdc_source))
+-- are streaming-compatible temporary views that share identical, normalized schemas.
+--
 -- Supported constructs:
 --  1. Initial hydration via AUTO CDC ONCE (once = true)
 --  2. Continuous change data ingestion with DELETE propagation

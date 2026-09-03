@@ -23,6 +23,12 @@ class RecordedTable:
 
 
 @dataclass
+class RecordedView:
+    name: str
+    comment: str | None
+
+
+@dataclass
 class RecordedFlow:
     name: str
     target: str
@@ -42,8 +48,9 @@ class FakePipelines:
 
     def __init__(self) -> None:
         self.tables: list[RecordedTable] = []
+        self.views: list[RecordedView] = []
         self.flows: list[RecordedFlow] = []
-        self.dataset_functions: dict[str, Callable] = {}
+        self.view_functions: dict[str, Callable] = {}
 
     def create_streaming_table(
         self,
@@ -86,9 +93,10 @@ class FakePipelines:
             )
         )
 
-    def table(self, name: str, comment: str | None = None) -> Callable:
+    def temporary_view(self, name: str, comment: str | None = None) -> Callable:
         def decorator(fn: Callable) -> Callable:
-            self.dataset_functions[name] = fn
+            self.views.append(RecordedView(name=name, comment=comment))
+            self.view_functions[name] = fn
             return fn
 
         return decorator
@@ -108,13 +116,13 @@ def test_lakeflow_pipeline_ast_compilation():
 def test_lakeflow_pipeline_top_level_automatic_registration(
     spark_session: SparkSession, monkeypatch: pytest.MonkeyPatch
 ):
-    """Verify evaluating/importing pipeline.py automatically registers streaming tables, AUTO CDC flows, and datasets."""
+    """Verify evaluating/importing pipeline.py automatically registers streaming tables, AUTO CDC flows, and temporary views."""
     fake_dp = FakePipelines()
 
     mock_pipelines_module = MagicMock()
     mock_pipelines_module.create_streaming_table = fake_dp.create_streaming_table
     mock_pipelines_module.create_auto_cdc_flow = fake_dp.create_auto_cdc_flow
-    mock_pipelines_module.table = fake_dp.table
+    mock_pipelines_module.temporary_view = fake_dp.temporary_view
 
     monkeypatch.setitem(sys.modules, "pyspark.pipelines", mock_pipelines_module)
 
@@ -186,8 +194,20 @@ def test_lakeflow_pipeline_top_level_automatic_registration(
         assert hf.track_history_column_list == sub_spec.history_track_columns
         assert len(hf.track_history_column_list) == 7
 
-    # 7. Source Datasets Verification (4 snapshot + 4 cdc = 8 source datasets)
-    assert len(fake_dp.dataset_functions) == 8
+    # 7. Source Streaming Temporary Views Verification (4 snapshot + 4 cdc = 8 source views)
+    assert len(fake_dp.views) == 8
+    assert len(fake_dp.view_functions) == 8
+    expected_views = {
+        "accounts_snapshot_source",
+        "accounts_cdc_source",
+        "subscriptions_snapshot_source",
+        "subscriptions_cdc_source",
+        "invoices_snapshot_source",
+        "invoices_cdc_source",
+        "payments_snapshot_source",
+        "payments_cdc_source",
+    }
+    assert {v.name for v in fake_dp.views} == expected_views
 
 
 def test_lakeflow_pipeline_custom_tombstone_config_registration(
@@ -199,7 +219,7 @@ def test_lakeflow_pipeline_custom_tombstone_config_registration(
     mock_pipelines_module = MagicMock()
     mock_pipelines_module.create_streaming_table = fake_dp.create_streaming_table
     mock_pipelines_module.create_auto_cdc_flow = fake_dp.create_auto_cdc_flow
-    mock_pipelines_module.table = fake_dp.table
+    mock_pipelines_module.temporary_view = fake_dp.temporary_view
     monkeypatch.setitem(sys.modules, "pyspark.pipelines", mock_pipelines_module)
 
     sys.modules.pop("databricks.lakeflow.pipeline", None)
@@ -208,7 +228,8 @@ def test_lakeflow_pipeline_custom_tombstone_config_registration(
     # Clear initial registrations from module import
     fake_dp.tables.clear()
     fake_dp.flows.clear()
-    fake_dp.dataset_functions.clear()
+    fake_dp.views.clear()
+    fake_dp.view_functions.clear()
 
     custom_cfg = LakeflowConfig(tombstone_gc_threshold_seconds=1209600)
     pipeline_mod.register_lakeflow_pipeline(custom_cfg)

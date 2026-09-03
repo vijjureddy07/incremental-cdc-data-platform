@@ -1,4 +1,4 @@
-"""Unit tests for Databricks Lakeflow source dataset projections and transformations."""
+"""Unit tests for Databricks Lakeflow source dataset projections and schema alignment."""
 
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
@@ -9,7 +9,11 @@ from pyspark.sql.types import (
     StructType,
 )
 
-from databricks.lakeflow.contracts import TABLE_CDC_SPECS
+from databricks.lakeflow.contracts import (
+    TABLE_CDC_SPECS,
+    expected_lakeflow_projection_schema,
+)
+from src.source.schemas import TABLE_SCHEMAS_MAP
 
 
 def test_accounts_cdc_projection_columns_and_isolation(spark_session: SparkSession):
@@ -56,7 +60,16 @@ def test_accounts_cdc_projection_columns_and_isolation(spark_session: SparkSessi
             "evt_001",
             "fp_001",
             "2026-05-11T01:00:00Z",
-            ("ACC-0001", "Acme Inc", "Software", "US", "ACTIVE", "2026-05-11T01:00:00Z", "2026-05-11T01:00:00Z", "100.00"),
+            (
+                "ACC-0001",
+                "Acme Inc",
+                "Software",
+                "US",
+                "ACTIVE",
+                "2026-05-11T01:00:00Z",
+                "2026-05-11T01:00:00Z",
+                "100.00",
+            ),
             None,
             ("ACC-0001",),
         )
@@ -64,22 +77,30 @@ def test_accounts_cdc_projection_columns_and_isolation(spark_session: SparkSessi
 
     df = spark_session.createDataFrame(data, schema=schema)
     spec = TABLE_CDC_SPECS["accounts"]
+    base_schema = TABLE_SCHEMAS_MAP["accounts"]
 
     pk = spec.primary_key
+    pk_field = base_schema[pk]
     select_exprs = [
-        F.coalesce(F.col(f"payload.{pk}"), F.col(f"before_payload.{pk}"), F.col(f"business_key.{pk}")).alias(pk)
+        F.coalesce(
+            F.col(f"payload.{pk}"),
+            F.col(f"before_payload.{pk}"),
+            F.col(f"business_key.{pk}"),
+        )
+        .cast(pk_field.dataType)
+        .alias(pk)
     ]
-    for col_name in spec.business_columns:
-        if col_name != pk:
-            select_exprs.append(F.col(f"payload.{col_name}").alias(col_name))
+    for f in base_schema.fields:
+        if f.name != pk:
+            select_exprs.append(F.col(f"payload.{f.name}").cast(f.dataType).alias(f.name))
 
     select_exprs.extend(
         [
-            F.col("operation").alias("operation"),
+            F.col("operation").cast("string").alias("operation"),
             F.col("sequence_number").cast("long").alias("sequence_number"),
-            F.col("event_id").alias("latest_event_id"),
-            F.col("event_fingerprint").alias("latest_event_fingerprint"),
-            F.col("source_commit_timestamp").alias("latest_source_commit_timestamp"),
+            F.col("event_id").cast("string").alias("latest_event_id"),
+            F.col("event_fingerprint").cast("string").alias("latest_event_fingerprint"),
+            F.col("source_commit_timestamp").cast("string").alias("latest_source_commit_timestamp"),
         ]
     )
 
@@ -142,19 +163,32 @@ def test_payment_delete_projection_preserves_primary_key(spark_session: SparkSes
 
     df = spark_session.createDataFrame(data, schema=schema)
     spec = TABLE_CDC_SPECS["payments"]
+    base_schema = TABLE_SCHEMAS_MAP["payments"]
     pk = spec.primary_key
+    pk_field = base_schema[pk]
 
     select_exprs = [
-        F.coalesce(F.col(f"payload.{pk}"), F.col(f"before_payload.{pk}"), F.col(f"business_key.{pk}")).alias(pk)
+        F.coalesce(
+            F.col(f"payload.{pk}"),
+            F.col(f"before_payload.{pk}"),
+            F.col(f"business_key.{pk}"),
+        )
+        .cast(pk_field.dataType)
+        .alias(pk)
     ]
     select_exprs.extend(
         [
-            F.col("operation").alias("operation"),
+            F.col("operation").cast("string").alias("operation"),
             F.col("sequence_number").cast("long").alias("sequence_number"),
+            F.col("event_id").cast("string").alias("latest_event_id"),
+            F.col("event_fingerprint").cast("string").alias("latest_event_fingerprint"),
+            F.col("source_commit_timestamp").cast("string").alias("latest_source_commit_timestamp"),
         ]
     )
 
-    projected_df = df.select(*select_exprs).filter(F.col("sequence_number").isNotNull() & F.col(pk).isNotNull())
+    projected_df = df.select(*select_exprs).filter(
+        F.col("sequence_number").isNotNull() & F.col(pk).isNotNull()
+    )
     assert projected_df.count() == 1
     row = projected_df.first()
     assert row["payment_id"] == "PAY-0002"
@@ -162,21 +196,122 @@ def test_payment_delete_projection_preserves_primary_key(spark_session: SparkSes
     assert row["sequence_number"] == 20
 
 
-def test_snapshot_hydration_projection_sequence_zero(spark_session: SparkSession):
-    """Verify snapshot projection assigns deterministic baseline sequence_number = 0 and operation = SNAPSHOT."""
-    data = [("ACC-0001", "Acme Inc"), ("ACC-0002", "Globex Corp")]
-    schema = StructType([StructField("account_id", StringType()), StructField("account_name", StringType())])
-
-    raw_df = spark_session.createDataFrame(data, schema=schema)
-    snapshot_df = (
-        raw_df.withColumn("sequence_number", F.lit(0).cast("long"))
-        .withColumn("operation", F.lit("SNAPSHOT"))
-        .filter(F.col("sequence_number").isNotNull() & F.col("account_id").isNotNull())
+def test_snapshot_hydration_projection_lineage_and_sequence_zero(spark_session: SparkSession):
+    """Verify snapshot projection assigns sequence_number = 0, operation = SNAPSHOT, and typed NULL lineage fields."""
+    base_schema = TABLE_SCHEMAS_MAP["accounts"]
+    data = [
+        (
+            "ACC-0001",
+            "Acme Inc",
+            "Software",
+            "US",
+            "ACTIVE",
+            "2026-05-11 00:00:00",
+            "2026-05-11 00:00:00",
+        ),
+    ]
+    raw_schema = StructType(
+        [
+            StructField("account_id", StringType()),
+            StructField("account_name", StringType()),
+            StructField("industry", StringType()),
+            StructField("country", StringType()),
+            StructField("status", StringType()),
+            StructField("created_at", StringType()),
+            StructField("updated_at", StringType()),
+        ]
     )
 
-    rows = snapshot_df.collect()
-    assert len(rows) == 2
-    for r in rows:
-        assert r["sequence_number"] == 0
-        assert r["operation"] == "SNAPSHOT"
-        assert r["account_id"] is not None
+    raw_df = spark_session.createDataFrame(data, schema=raw_schema)
+    select_exprs = [F.col(f.name).cast(f.dataType).alias(f.name) for f in base_schema.fields]
+    select_exprs.extend(
+        [
+            F.lit("SNAPSHOT").cast("string").alias("operation"),
+            F.lit(0).cast("long").alias("sequence_number"),
+            F.lit(None).cast("string").alias("latest_event_id"),
+            F.lit(None).cast("string").alias("latest_event_fingerprint"),
+            F.lit(None).cast("string").alias("latest_source_commit_timestamp"),
+        ]
+    )
+
+    snapshot_df = raw_df.select(*select_exprs).filter(
+        F.col("sequence_number").isNotNull() & F.col("account_id").isNotNull()
+    )
+
+    assert snapshot_df.count() == 1
+    row = snapshot_df.first()
+    assert row["sequence_number"] == 0
+    assert row["operation"] == "SNAPSHOT"
+    assert row["latest_event_id"] is None
+    assert row["latest_event_fingerprint"] is None
+    assert row["latest_source_commit_timestamp"] is None
+
+
+def test_snapshot_and_cdc_schema_equality_across_all_tables(spark_session: SparkSession):
+    """Verify snapshot projection and CDC projection produce identical field names and data types for all tables."""
+    for table_name in ["accounts", "subscriptions", "invoices", "payments"]:
+        expected_schema = expected_lakeflow_projection_schema(table_name)
+        expected_field_dict = {f.name: f.dataType for f in expected_schema.fields}
+
+        base_schema = TABLE_SCHEMAS_MAP[table_name]
+        spec = TABLE_CDC_SPECS[table_name]
+
+        # 1. Snapshot projection schema
+        snap_select = [F.col(f.name).cast(f.dataType).alias(f.name) for f in base_schema.fields]
+        snap_select.extend(
+            [
+                F.lit("SNAPSHOT").cast("string").alias("operation"),
+                F.lit(0).cast("long").alias("sequence_number"),
+                F.lit(None).cast("string").alias("latest_event_id"),
+                F.lit(None).cast("string").alias("latest_event_fingerprint"),
+                F.lit(None).cast("string").alias("latest_source_commit_timestamp"),
+            ]
+        )
+        empty_snap_df = spark_session.createDataFrame([], schema=base_schema).select(*snap_select)
+        snap_fields = {f.name: f.dataType for f in empty_snap_df.schema.fields}
+
+        # 2. CDC projection schema
+        pk = spec.primary_key
+        pk_field = base_schema[pk]
+        cdc_raw_schema = StructType(
+            [
+                StructField("table_name", StringType()),
+                StructField("operation", StringType()),
+                StructField("sequence_number", LongType()),
+                StructField("event_id", StringType()),
+                StructField("event_fingerprint", StringType()),
+                StructField("source_commit_timestamp", StringType()),
+                StructField("payload", base_schema),
+                StructField("before_payload", StructType([StructField(pk, pk_field.dataType)])),
+                StructField("business_key", StructType([StructField(pk, pk_field.dataType)])),
+            ]
+        )
+        cdc_select = [
+            F.coalesce(
+                F.col(f"payload.{pk}"),
+                F.col(f"before_payload.{pk}"),
+                F.col(f"business_key.{pk}"),
+            )
+            .cast(pk_field.dataType)
+            .alias(pk)
+        ]
+        for f in base_schema.fields:
+            if f.name != pk:
+                cdc_select.append(F.col(f"payload.{f.name}").cast(f.dataType).alias(f.name))
+        cdc_select.extend(
+            [
+                F.col("operation").cast("string").alias("operation"),
+                F.col("sequence_number").cast("long").alias("sequence_number"),
+                F.col("event_id").cast("string").alias("latest_event_id"),
+                F.col("event_fingerprint").cast("string").alias("latest_event_fingerprint"),
+                F.col("source_commit_timestamp")
+                .cast("string")
+                .alias("latest_source_commit_timestamp"),
+            ]
+        )
+        empty_cdc_df = spark_session.createDataFrame([], schema=cdc_raw_schema).select(*cdc_select)
+        cdc_fields = {f.name: f.dataType for f in empty_cdc_df.schema.fields}
+
+        # Assert field-by-field equality between snapshot and CDC projections
+        assert snap_fields == cdc_fields
+        assert snap_fields == expected_field_dict

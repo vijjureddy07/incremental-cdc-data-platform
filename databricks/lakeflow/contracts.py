@@ -2,6 +2,15 @@
 
 from dataclasses import dataclass, field
 
+from pyspark.sql.types import (
+    LongType,
+    StringType,
+    StructField,
+    StructType,
+)
+
+from src.source.schemas import TABLE_SCHEMAS_MAP
+
 
 @dataclass(frozen=True)
 class TableCDCSpec:
@@ -22,6 +31,22 @@ class TableCDCSpec:
     excluded_columns: list[str] = field(
         default_factory=lambda: ["operation", "sequence_number"]
     )
+
+
+def expected_lakeflow_projection_schema(table_name: str) -> StructType:
+    """Derive the authoritative Lakeflow AUTO CDC source projection schema for a table."""
+    base_schema = TABLE_SCHEMAS_MAP[table_name]
+    fields = list(base_schema.fields)
+    fields.extend(
+        [
+            StructField("operation", StringType(), False),
+            StructField("sequence_number", LongType(), False),
+            StructField("latest_event_id", StringType(), True),
+            StructField("latest_event_fingerprint", StringType(), True),
+            StructField("latest_source_commit_timestamp", StringType(), True),
+        ]
+    )
+    return StructType(fields)
 
 
 TABLE_CDC_SPECS: dict[str, TableCDCSpec] = {

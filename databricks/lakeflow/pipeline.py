@@ -8,33 +8,56 @@ and SCD Type 2 history tables.
 from pyspark import pipelines as dp
 from pyspark.sql import functions as F
 
-from databricks.lakeflow.config import LakeflowConfig, build_snapshot_path
+from databricks.lakeflow.config import (
+    LakeflowConfig,
+    build_snapshot_directory,
+)
 from databricks.lakeflow.contracts import TABLE_CDC_SPECS, TableCDCSpec
+from src.source.schemas import TABLE_SCHEMAS_MAP
 
 
 def build_snapshot_projection(table_name: str, config: LakeflowConfig) -> str:
-    """Register and return the snapshot hydration source dataset name."""
+    """Register and return the snapshot hydration streaming temporary view name."""
     spec = TABLE_CDC_SPECS[table_name]
     source_name = spec.snapshot_source_name
+    base_schema = TABLE_SCHEMAS_MAP[table_name]
 
-    # In Databricks Lakeflow runtime, table functions define streaming/batch datasets
-    @dp.table(
+    # In Databricks Lakeflow runtime, temporary_view defines intermediate streaming source views
+    @dp.temporary_view(
         name=source_name,
-        comment=f"Initial snapshot hydration source dataset for {table_name}",
+        comment=f"Initial snapshot hydration streaming temporary view for {table_name}",
     )
     def snapshot_dataset():
         from pyspark.sql import SparkSession
 
         spark = SparkSession.getActiveSession()
-        snapshot_path = build_snapshot_path(table_name, config)
+        snapshot_dir = build_snapshot_directory(table_name, config)
 
-        # Read snapshot Parquet files
-        raw_df = spark.read.parquet(snapshot_path)
+        # Read snapshot Parquet files as a stream via Auto Loader (cloudFiles)
+        raw_stream = (
+            spark.readStream.format("cloudFiles")
+            .option("cloudFiles.format", "parquet")
+            .option("cloudFiles.includeExistingFiles", "true")
+            .load(snapshot_dir)
+        )
 
-        # Attach deterministic snapshot sequence baseline (sequence_number = 0)
+        # Project explicit business types matching frozen schema + lineage placeholders
+        select_exprs = [
+            F.col(f.name).cast(f.dataType).alias(f.name)
+            for f in base_schema.fields
+        ]
+        select_exprs.extend(
+            [
+                F.lit("SNAPSHOT").cast("string").alias("operation"),
+                F.lit(0).cast("long").alias("sequence_number"),
+                F.lit(None).cast("string").alias("latest_event_id"),
+                F.lit(None).cast("string").alias("latest_event_fingerprint"),
+                F.lit(None).cast("string").alias("latest_source_commit_timestamp"),
+            ]
+        )
+
         return (
-            raw_df.withColumn("sequence_number", F.lit(0).cast("long"))
-            .withColumn("operation", F.lit("SNAPSHOT"))
+            raw_stream.select(*select_exprs)
             .filter(F.col("sequence_number").isNotNull() & F.col(spec.primary_key).isNotNull())
         )
 
@@ -42,13 +65,14 @@ def build_snapshot_projection(table_name: str, config: LakeflowConfig) -> str:
 
 
 def build_cdc_projection(table_name: str, config: LakeflowConfig) -> str:
-    """Register and return the continuous normalized CDC source dataset name."""
+    """Register and return the continuous normalized CDC streaming temporary view name."""
     spec = TABLE_CDC_SPECS[table_name]
     source_name = spec.cdc_source_name
+    base_schema = TABLE_SCHEMAS_MAP[table_name]
 
-    @dp.table(
+    @dp.temporary_view(
         name=source_name,
-        comment=f"Continuous normalized CDC source dataset for {table_name}",
+        comment=f"Continuous normalized CDC streaming temporary view for {table_name}",
     )
     def cdc_dataset():
         from pyspark.sql import SparkSession
@@ -61,38 +85,39 @@ def build_cdc_projection(table_name: str, config: LakeflowConfig) -> str:
             spark.readStream.format("cloudFiles")
             .option("cloudFiles.format", "json")
             .option("cloudFiles.inferColumnTypes", "true")
+            .option("cloudFiles.includeExistingFiles", "true")
             .load(cdc_path)
         )
 
         # Filter strictly for this table's events
         table_events = raw_stream.filter(F.col("table_name") == spec.source_table)
 
-        # Project flattened business columns + control columns
-        select_exprs = []
-
-        # 1. Primary key: preserve PK from payload for INSERT/UPDATE or before_payload/business_key for DELETE
+        # Project explicit business types matching frozen schema + CDC operational metadata
         pk = spec.primary_key
-        select_exprs.append(
+        pk_field = base_schema[pk]
+        select_exprs = [
             F.coalesce(
                 F.col(f"payload.{pk}"),
                 F.col(f"before_payload.{pk}"),
                 F.col(f"business_key.{pk}"),
-            ).alias(pk)
-        )
+            )
+            .cast(pk_field.dataType)
+            .alias(pk)
+        ]
 
-        # 2. Non-PK business columns from payload
-        for col_name in spec.business_columns:
-            if col_name != pk:
-                select_exprs.append(F.col(f"payload.{col_name}").alias(col_name))
+        # Business non-PK columns cast to authoritative domain types
+        for f in base_schema.fields:
+            if f.name != pk:
+                select_exprs.append(F.col(f"payload.{f.name}").cast(f.dataType).alias(f.name))
 
-        # 3. CDC operational and control columns
+        # CDC operational and control columns
         select_exprs.extend(
             [
-                F.col("operation").alias("operation"),
+                F.col("operation").cast("string").alias("operation"),
                 F.col("sequence_number").cast("long").alias("sequence_number"),
-                F.col("event_id").alias("latest_event_id"),
-                F.col("event_fingerprint").alias("latest_event_fingerprint"),
-                F.col("source_commit_timestamp").alias("latest_source_commit_timestamp"),
+                F.col("event_id").cast("string").alias("latest_event_id"),
+                F.col("event_fingerprint").cast("string").alias("latest_event_fingerprint"),
+                F.col("source_commit_timestamp").cast("string").alias("latest_source_commit_timestamp"),
             ]
         )
 

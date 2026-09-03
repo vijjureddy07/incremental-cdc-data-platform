@@ -76,3 +76,8 @@ class LakeflowConfig:
 def build_snapshot_path(table_name: str, config: LakeflowConfig) -> str:
     """Construct the Parquet snapshot file path matching Module 1 directory layout."""
     return f"{config.snapshot_base_path}/{table_name}/snapshot.parquet"
+
+
+def build_snapshot_directory(table_name: str, config: LakeflowConfig) -> str:
+    """Construct the Parquet snapshot directory path matching Module 1 directory layout."""
+    return f"{config.snapshot_base_path}/{table_name}"
