@@ -114,12 +114,18 @@ def test_ci_workflow_contract():
     assert "python -m build --wheel" in raw_text
     assert "dist/*.whl" in raw_text
 
-    # Real isolation assertions
+    # Real isolation assertions: external venv outside GITHUB_WORKSPACE
+    assert "RUNNER_TEMP" in raw_text, "Smoke test must use external RUNNER_TEMP or temporary location"
     assert "mktemp -d" in raw_text, "Smoke test must create temporary directory outside repo"
     assert 'cd "$SMOKE_DIR"' in raw_text, "Smoke test must cd into temporary directory"
     assert "-P" in raw_text, "Smoke test must invoke python with -P safe-path option"
     assert "repo not in module_path.parents" in raw_text, "Smoke test must verify modules are not from repo checkout"
     assert "venv in module_path.parents" in raw_text, "Smoke test must verify modules are loaded from smoke venv"
+
+    # Explicitly reject creation of in-repo smoke_env
+    assert "python -m venv smoke_env" not in raw_text, "Creation of smoke_env inside repo checkout is prohibited"
+    assert "smoke_env/bin/pip" not in raw_text, "Usage of in-repo smoke_env/bin/pip is prohibited"
+    assert "smoke_env/bin/python" not in raw_text, "Usage of in-repo smoke_env/bin/python is prohibited"
 
     # No secrets or cloud credentials required
     assert "secrets." not in raw_text

@@ -48,14 +48,18 @@ jobs:
 
       - name: Isolated Wheel Smoke Verification
         run: |
-          SMOKE_VENV="${RUNNER_TEMP:-/tmp}/smoke_env"
-          rm -rf "$SMOKE_VENV"
-          python -m venv "$SMOKE_VENV"
-          "$SMOKE_VENV/bin/pip" install --upgrade pip
-          "$SMOKE_VENV/bin/pip" install dist/*.whl
+          VENV_DIR="${RUNNER_TEMP:-/tmp}/wheel-smoke-venv"
           SMOKE_DIR="$(mktemp -d)"
+          rm -rf "$VENV_DIR"
+
+          python -m venv "$VENV_DIR"
+
+          "$VENV_DIR/bin/pip" install --upgrade pip
+          "$VENV_DIR/bin/pip" install "$GITHUB_WORKSPACE"/dist/*.whl
+
           cd "$SMOKE_DIR"
-          "$SMOKE_VENV/bin/python" -P -c "
+
+          "$VENV_DIR/bin/python" -P -c "
           import os
           import sys
           from pathlib import Path
@@ -89,4 +93,4 @@ jobs:
 
           print('Successfully verified all src modules loaded from isolated wheel site-packages!')
           "
-          rm -rf "$SMOKE_VENV" "$SMOKE_DIR"
+          rm -rf "$VENV_DIR" "$SMOKE_DIR"
